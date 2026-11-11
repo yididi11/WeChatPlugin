@@ -1,4 +1,4 @@
-// WeChatPlugin — Phase 6.1：抢红包 DK 忠实度审计对齐（适配微信 8.0.79）
+// WeChatPlugin — Phase 6.2：白名单页会话列表加载修复（适配微信 8.0.79）
 //
 // 在 Phase 4 的基础上只做一件事：
 //   1. 设置页格式分区第 1 行（自定义格式）和第 6 行（自定义颜色）不再是内联
@@ -36,6 +36,21 @@
 //   字符串，其他类型/空值才放弃。其余与 DK 的差异都是有意保留的（白名单模式、
 //   4 处防闪退安全改动）或用户没要的功能（延迟、关键词过滤、后台抢、串行队列），
 //   详见 phase6.1-NOTES.md。版本号升到 HBG · Phase 6.1。
+// Phase 6.2：修白名单选择页打不开会话列表（用户真机截图：页里只有"群聊"
+//   "私聊"两个分区头和底部"未选择任何会话"，一行会话都没有）。
+//   根因（见 phase6.2-NOTES.md §1）：会话列表是懒加载的——MMNewSessionMgr
+//   的 m_arrSession 只在聊天列表构建后才有内容（IsSessionNeedDelayLoad /
+//   tryToBuildSession: / p_buildSession: / checkLoadData，MMNewSessionMgr.h
+//   :103/:107/:109/:133）；Phase 6 只在后台线程调了一次
+//   GetUserNamesOnSessionList（只读内存里的 m_arrSession），构建还没跑完就
+//   拿到空数组，于是显示空列表。改动：加载改到主线程 + 多路兜底
+//   （checkLoadData → GetUserNamesOnSessionList →
+//   GetSyncUserNamesOnSessionListWithMaxCount:500 → GetSessionInfoList →
+//   object_getIvar 读 m_arrSession，任一路拿到非空名单就停）；全部兜底都空
+//   时 footer 显示"会话列表加载失败，点这里重试"（点 footer 重新加载），
+//   并在 1.5 秒后自动再试一次（覆盖构建稍后才跑完的情况）；
+//   IsSessionNeedDelayLoad 判为"已构建"时空列表才显示原来的"未选择任何
+//   会话"。版本号升到 HBG · Phase 6.2。
 //
 // Phase 3.1 的修复原样保留：逻辑/物理分区换算用 >=、格式分区标题显式返回 nil、
 // 开关拨动和收起/展开一律 reloadData（绝不用 insert/deleteSections/Rows）。
@@ -106,6 +121,16 @@
 
 @interface MMNewSessionMgr : NSObject
 - (id)GetUserNamesOnSessionList; // MMNewSessionMgr.h:142
+- (void)checkLoadData; // MMNewSessionMgr.h:103
+- (id)GetSyncUserNamesOnSessionListWithMaxCount:(unsigned int)arg1; // MMNewSessionMgr.h:141
+- (id)GetSessionInfoList; // MMNewSessionMgr.h:187
+- (_Bool)IsSessionNeedDelayLoad; // MMNewSessionMgr.h:133
+@end
+
+// 会话对象：username 和已加载的联系人直接取（MMSessionInfo.h:136 / :130）。
+@interface MMSessionInfo : NSObject
+@property (retain, nonatomic) NSString *m_nsUserName;
+@property (retain, nonatomic) CContact *m_contact;
 @end
 
 @interface WCBizUtil : NSObject
@@ -1197,12 +1222,61 @@ static NSString *WCPHBRequestSign(HongBaoReq *req) {
 // =========================================================================
 // 白名单选择页 —— 纯 UIKit 的 UITableViewController 风格 VC，列出用户的全部
 // 会话（群聊在前、私聊在后），每行一个开关；开关状态即白名单内容，存 username。
-// 会话列表来自 MMNewSessionMgr GetUserNamesOnSessionList（MMNewSessionMgr.h:142，
-// 返回会话 username 数组，按微信会话顺序）；显示名用 CContactMgr
-// getContactByName: 取联系人再 getContactDisplayName；群聊按 username 含
-// "@chatroom" 区分。getContactByName 可能查库，所以在后台线程建列表，建好再
-// 回主线程刷表；任何一步失败都只显示空列表，不闪退。
+// 会话列表多路兜底（Phase 6.2，根因见文件头）：checkLoadData →
+// GetUserNamesOnSessionList（MMNewSessionMgr.h:142，内存里的 username 数组）→
+// GetSyncUserNamesOnSessionListWithMaxCount:500（:141，同步版）→
+// GetSessionInfoList（:187，会话对象数组，username/显示名直接取）→
+// object_getIvar 读 m_arrSession（:11，内存缓存里的 MMSessionInfo 数组）。
+// 任一路拿到非空名单就停；显示名优先用会话对象自带的 m_contact，拿不到再
+// getContactByName: 查；群聊按 username 含 "@chatroom" 区分。会话数不大，
+// 加载在主线程做一次（也避开了后台线程读会话管理器撞上主线程懒加载构建的
+// 竞态）。全部兜底都空时 footer 显示重试入口（点 footer 重新加载），1.5 秒
+// 后还自动再试一次；IsSessionNeedDelayLoad 判为"已构建"时空列表才显示
+// "未选择任何会话"。任何一步失败都只走下一路，不闪退。
 // =========================================================================
+
+// 白名单页的 item 构造辅助（Phase 6.2：多路兜底共用）。
+// 显示名优先用会话对象自带的 m_contact，拿不到再 getContactByName: 查，
+// 再拿不到就显示 username 本身——显示名拿不到不影响选择。
+static NSDictionary *WCPWhitelistItemForUsername(NSString *username, CContactMgr *contactMgr) {
+    NSString *displayName = username;
+    @try {
+        CContact *contact = [contactMgr getContactByName:username];
+        NSString *dn = [contact getContactDisplayName];
+        if (dn.length) displayName = dn;
+    } @catch (NSException *e) {
+        // 联系人取不到显示名就用 username 本身。
+    }
+    return @{@"username": username, @"displayName": displayName};
+}
+
+static NSDictionary *WCPWhitelistItemForSessionInfo(MMSessionInfo *info, CContactMgr *contactMgr) {
+    NSString *username = nil;
+    @try { username = info.m_nsUserName; } @catch (NSException *e) {}
+    if (![username isKindOfClass:[NSString class]] || !username.length) return nil;
+    NSString *displayName = username;
+    @try {
+        CContact *contact = info.m_contact;
+        NSString *dn = [contact getContactDisplayName];
+        if (dn.length) displayName = dn;
+    } @catch (NSException *e) {}
+    if ([displayName isEqualToString:username]) {
+        displayName = WCPWhitelistItemForUsername(username, contactMgr)[@"displayName"];
+    }
+    return @{@"username": username, @"displayName": displayName};
+}
+
+// 群聊按 username 含 "@chatroom" 区分（DK 的 isGroupReceiver 就是这个判断）。
+static void WCPWhitelistAppendItem(NSDictionary *item, NSMutableArray *groups, NSMutableArray *privates) {
+    if (!item) return;
+    NSString *username = item[@"username"];
+    if ([username rangeOfString:@"@chatroom"].location != NSNotFound) {
+        [groups addObject:item];
+    } else {
+        [privates addObject:item];
+    }
+}
+
 
 static const char kWCPWhitelistUsernameKey = 0;
 
@@ -1211,6 +1285,8 @@ static const char kWCPWhitelistUsernameKey = 0;
 @property (nonatomic, strong) NSArray *groupSessions;   // 每项 @{@"username":..., @"displayName":...}
 @property (nonatomic, strong) NSArray *privateSessions;
 @property (nonatomic, assign) BOOL loaded;
+@property (nonatomic, assign) BOOL loadFailed;   // 全部兜底都空：footer 显示重试入口
+@property (nonatomic, assign) BOOL didAutoRetry; // 1.5 秒自动重试只跑一次
 @end
 
 @implementation WCPWhitelistViewController
@@ -1231,52 +1307,119 @@ static const char kWCPWhitelistUsernameKey = 0;
     self.groupSessions = @[];
     self.privateSessions = @[];
     self.loaded = NO;
+    self.loadFailed = NO;
+    self.didAutoRetry = NO;
     [self loadSessions];
 }
 
-// 后台读会话列表，建好再回主线程刷表。
+// Phase 6.2：加载改到主线程 + 多路兜底（根因见文件头和 phase6.2-NOTES.md §1）。
+// 会话列表是懒加载的：MMNewSessionMgr 的 m_arrSession 只在聊天列表构建后
+// 才有内容；只调一次 GetUserNamesOnSessionList（只读内存）且构建还没跑完
+// 时，拿到的是空数组——Phase 6 的空列表就是这么来的。
+//   路 1：checkLoadData（确保数据已加载）→ GetUserNamesOnSessionList；
+//   路 2：GetSyncUserNamesOnSessionListWithMaxCount:500（同步版，带上限，
+//          名字里的 Sync 说明它会同步保证拿到快照）；
+//   路 3：GetSessionInfoList（会话对象数组，username 和显示名直接从对象取）；
+//   路 4：object_getIvar 读 m_arrSession（内存缓存里的 MMSessionInfo 数组，
+//          运行时查字段，绝不用 MSHookIvar）。
+// 任一路拿到非空名单就停；每步都判空、判类型、包 @try/@catch，异常走下一路。
+// 会话数不大（几十到几百），主线程读一次即可，也避开了后台线程读会话
+// 管理器可能撞上主线程懒加载构建的竞态。
 - (void)loadSessions {
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        NSArray *groups = @[];
-        NSArray *privates = @[];
+    MMNewSessionMgr *sessionMgr = nil;
+    CContactMgr *contactMgr = nil;
+    @try {
+        sessionMgr = [[%c(MMServiceCenter) defaultCenter] getService:%c(MMNewSessionMgr)];
+        contactMgr = [[%c(MMServiceCenter) defaultCenter] getService:%c(CContactMgr)];
+    } @catch (NSException *e) {
+        // 服务拿不到就直接走空列表 + 重试入口。
+    }
+    NSMutableArray *groups = [NSMutableArray array];
+    NSMutableArray *privates = [NSMutableArray array];
+    if (sessionMgr) {
+        // 先触发一次加载（无参方法，语义明确：确保数据已加载）。
         @try {
-            MMNewSessionMgr *sessionMgr = [[%c(MMServiceCenter) defaultCenter] getService:%c(MMNewSessionMgr)];
-            CContactMgr *contactMgr = [[%c(MMServiceCenter) defaultCenter] getService:%c(CContactMgr)];
+            if ([sessionMgr respondsToSelector:@selector(checkLoadData)]) [sessionMgr checkLoadData];
+        } @catch (NSException *e) {}
+        // 路 1：内存里的 username 列表。
+        @try {
             id userNames = [sessionMgr GetUserNamesOnSessionList];
             if ([userNames isKindOfClass:[NSArray class]]) {
-                NSMutableArray *g = [NSMutableArray array];
-                NSMutableArray *p = [NSMutableArray array];
                 for (id name in (NSArray *)userNames) {
                     if (![name isKindOfClass:[NSString class]] || ![(NSString *)name length]) continue;
-                    NSString *username = (NSString *)name;
-                    NSString *displayName = username;
-                    @try {
-                        CContact *contact = [contactMgr getContactByName:username];
-                        NSString *dn = [contact getContactDisplayName];
-                        if (dn.length) displayName = dn;
-                    } @catch (NSException *e) {
-                        // 联系人取不到显示名就用 username 本身，不影响选择。
-                    }
-                    NSDictionary *item = @{@"username": username, @"displayName": displayName};
-                    if ([username rangeOfString:@"@chatroom"].location != NSNotFound) {
-                        [g addObject:item];
-                    } else {
-                        [p addObject:item];
+                    WCPWhitelistAppendItem(WCPWhitelistItemForUsername((NSString *)name, contactMgr), groups, privates);
+                }
+            }
+        } @catch (NSException *e) {}
+        // 路 2：同步版 username 列表（上限 500，覆盖任何正常用户的会话数）。
+        if (groups.count + privates.count == 0) {
+            @try {
+                id userNames = [sessionMgr GetSyncUserNamesOnSessionListWithMaxCount:500];
+                if ([userNames isKindOfClass:[NSArray class]]) {
+                    for (id name in (NSArray *)userNames) {
+                        if (![name isKindOfClass:[NSString class]] || ![(NSString *)name length]) continue;
+                        WCPWhitelistAppendItem(WCPWhitelistItemForUsername((NSString *)name, contactMgr), groups, privates);
                     }
                 }
-                groups = [g copy];
-                privates = [p copy];
-            }
-        } @catch (NSException *e) {
-            // 会话列表读不到就显示空列表，不闪退。
+            } @catch (NSException *e) {}
         }
-        dispatch_async(dispatch_get_main_queue(), ^{
-            self.groupSessions = groups;
-            self.privateSessions = privates;
-            self.loaded = YES;
-            [self.tableView reloadData];
+        // 路 3：会话对象数组（username / 显示名直接从对象取，不用再查联系人）。
+        if (groups.count + privates.count == 0) {
+            @try {
+                id infos = [sessionMgr GetSessionInfoList];
+                if ([infos isKindOfClass:[NSArray class]]) {
+                    for (id info in (NSArray *)infos) {
+                        if (![info isKindOfClass:%c(MMSessionInfo)]) continue;
+                        WCPWhitelistAppendItem(WCPWhitelistItemForSessionInfo(info, contactMgr), groups, privates);
+                    }
+                }
+            } @catch (NSException *e) {}
+        }
+        // 路 4：直接读内存缓存 m_arrSession（MMSessionInfo 数组）。
+        if (groups.count + privates.count == 0) {
+            @try {
+                Ivar ivar = class_getInstanceVariable(%c(MMNewSessionMgr), "m_arrSession");
+                if (ivar) {
+                    id arr = object_getIvar(sessionMgr, ivar);
+                    if ([arr isKindOfClass:[NSArray class]]) {
+                        for (id info in (NSArray *)arr) {
+                            if (![info isKindOfClass:%c(MMSessionInfo)]) continue;
+                            WCPWhitelistAppendItem(WCPWhitelistItemForSessionInfo(info, contactMgr), groups, privates);
+                        }
+                    }
+                }
+            } @catch (NSException *e) {}
+        }
+    }
+    self.groupSessions = [groups copy];
+    self.privateSessions = [privates copy];
+    self.loaded = YES;
+    self.loadFailed = (groups.count + privates.count == 0);
+    // 空列表时分两种情况：会话列表还没构建完（IsSessionNeedDelayLoad=YES）
+    // → 加载失败，显示重试入口；已构建完但确实一个会话都没有（新号、从没
+    // 聊过天，极少见）→ 显示原来的"未选择任何会话"。查不到这个状态时按
+    // 加载失败处理（重试入口更稳妥，点一下就知道）。
+    if (self.loadFailed) {
+        @try {
+            if ([sessionMgr respondsToSelector:@selector(IsSessionNeedDelayLoad)] && ![sessionMgr IsSessionNeedDelayLoad]) {
+                self.loadFailed = NO;
+            }
+        } @catch (NSException *e) {}
+    }
+    [self.tableView reloadData];
+    // 全部兜底都空：可能是懒加载构建还没跑完，1.5 秒后自动再试一次（只跑
+    // 一次；构建稍后才跑完时这次就能拿到，不用用户手动点重试）。
+    if (self.loadFailed && !self.didAutoRetry) {
+        self.didAutoRetry = YES;
+        __weak typeof(self) weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            if (strongSelf.groupSessions.count + strongSelf.privateSessions.count == 0) {
+                [strongSelf loadSessions];
+            }
         });
-    });
+    }
 }
 
 - (NSArray *)rowsForSection:(NSInteger)section {
@@ -1298,9 +1441,35 @@ static const char kWCPWhitelistUsernameKey = 0;
 - (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
     if (!self.loaded) return section == 1 ? @"正在加载会话列表…" : nil;
     if (section != 1) return nil;
+    if (self.loadFailed) return nil; // 加载失败走下面的可点 footer，不用标题 footer
     NSUInteger n = WCPWhitelistUsernames().count;
     if (n == 0) return @"未选择任何会话，不会抢红包";
     return [NSString stringWithFormat:@"已选 %lu 个会话，仅这些会话的红包会被自动抢", (unsigned long)n];
+}
+
+// 加载失败时第 1 分区显示一个可点的 footer（点一下重新加载）；
+// 正常时返回 nil，用上面的标题 footer。
+- (UIView *)tableView:(UITableView *)tableView viewForFooterInSection:(NSInteger)section {
+    if (section != 1 || !self.loadFailed) return nil;
+    UILabel *label = [[UILabel alloc] init];
+    label.text = @"会话列表加载失败，点这里重试";
+    label.textColor = [UIColor systemBlueColor];
+    label.font = [UIFont systemFontOfSize:13];
+    label.textAlignment = NSTextAlignmentCenter;
+    label.userInteractionEnabled = YES;
+    [label addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(retryLoadSessions)]];
+    return label;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForFooterInSection:(NSInteger)section {
+    if (section == 1 && self.loadFailed) return 44;
+    return tableView.sectionFooterHeight; // 其余情况沿用系统默认高度，不动原有间距
+}
+
+// 手动重试：把自动重试标志清掉（失败后还能再自动补一次），重新加载。
+- (void)retryLoadSessions {
+    self.didAutoRetry = NO;
+    [self loadSessions];
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -1713,7 +1882,7 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     } else {
         if (indexPath.row == 0) {
             cell.textLabel.text = @"当前版本";
-            cell.detailTextLabel.text = @"HBG · Phase 6.1 · 适配微信 8.0.79";
+            cell.detailTextLabel.text = @"HBG · Phase 6.2 · 适配微信 8.0.79";
         } else {
             cell.textLabel.text = @"来源";
             cell.detailTextLabel.text = @"移植自 DKWechatHelper v1.1.0";
