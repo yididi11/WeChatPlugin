@@ -1,4 +1,4 @@
-// WeChatPlugin — Phase 6：自动抢红包，白名单模式（适配微信 8.0.79）
+// WeChatPlugin — Phase 6.1：抢红包 DK 忠实度审计对齐（适配微信 8.0.79）
 //
 // 在 Phase 4 的基础上只做一件事：
 //   1. 设置页格式分区第 1 行（自定义格式）和第 6 行（自定义颜色）不再是内联
@@ -27,6 +27,15 @@
 //      OpenRedEnvelopesRequest: 开红包。消息本身一律走 %orig，不拦截不改消息。
 //   4. 弹窗的玻璃代码原样不动（真机上玻璃效果没出来，用户说先不管它）。
 //   版本号升到 HBG · Phase 6。
+// Phase 6.1：抢红包 DK 忠实度审计（用户要求着重参考 DK 原项目）：
+//   把 Phase 6 逐行对照 DK 原版（dkhelperDylib.xm 红包检测 144-260 行、响应
+//   304-355 行；DKHelper.m toParams 291-305 行、操作类 368-427 行、任务队列
+//   436-469 行），结论：核心链路已与 DK 对齐，只改了一处会影响抢得到的
+//   地方——timingIdentifier 的类型：DK 只判断存在性，Phase 6 只认 NSString；
+//   8.0.79 若返回数字会被直接放弃。现按 DK 语义对齐：字符串直接用，数字转
+//   字符串，其他类型/空值才放弃。其余与 DK 的差异都是有意保留的（白名单模式、
+//   4 处防闪退安全改动）或用户没要的功能（延迟、关键词过滤、后台抢、串行队列），
+//   详见 phase6.1-NOTES.md。版本号升到 HBG · Phase 6.1。
 //
 // Phase 3.1 的修复原样保留：逻辑/物理分区换算用 >=、格式分区标题显式返回 nil、
 // 开关拨动和收起/展开一律 reloadData（绝不用 insert/deleteSections/Rows）。
@@ -1704,7 +1713,7 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     } else {
         if (indexPath.row == 0) {
             cell.textLabel.text = @"当前版本";
-            cell.detailTextLabel.text = @"HBG · Phase 6 · 适配微信 8.0.79";
+            cell.detailTextLabel.text = @"HBG · Phase 6.1 · 适配微信 8.0.79";
         } else {
             cell.textLabel.text = @"来源";
             cell.detailTextLabel.text = @"移植自 DKWechatHelper v1.1.0";
@@ -2020,7 +2029,7 @@ static const char kWCPJumpTapAttachedKey = 0;
 // 链路（DK 原样）：只有 cgiCmdid == 3（参数查询的响应）才处理；从队列里取出发
 // 查询时入队的参数；解析响应 JSON，校验 receiveStatus != 2（自己已抢过）、
 // hbStatus != 4（已抢完）、有 timingIdentifier（缺这个字段会被判外挂，直接
-// 放弃）、sign 对得上（请求原文里的 sign 和入队时的 sign 一致；自己发的群红包
+// 放弃；按 DK 只判断存在性，字符串直接用、数字转字符串——Phase 6.1）、sign 对得上（请求原文里的 sign 和入队时的 sign 一致；自己发的群红包
 // 没有 sign，DK 那里跳过校验——Phase 6 不抢自己的，所以这里恒做校验）；
 // 都通过才把 timingIdentifier 填进参数，起一个开红包操作（延迟 0，立即开）
 // 放进任务队列（并发最多 5 个）。
@@ -2047,9 +2056,15 @@ static const char kWCPJumpTapAttachedKey = 0;
         if ([resp[@"receiveStatus"] integerValue] == 2) return;
         // 红包被抢完
         if ([resp[@"hbStatus"] integerValue] == 4) return;
-        // 没有这个字段会被判定为使用外挂
-        NSString *timingId = resp[@"timingIdentifier"];
-        if (![timingId isKindOfClass:[NSString class]] || !timingId.length) return;
+        // 没有这个字段会被判定为使用外挂。
+        // DK 只判断存在性（dkhelperDylib.xm:338：if (!responseDict[@"timingIdentifier"]);
+        // Phase 6 原来只认 NSString——8.0.79 若返回数字会被直接放弃，白白漏抢。
+        // 这里按 DK 的语义对齐：字符串直接用，数字转成字符串，其他类型/空值才放弃。
+        id timingIdObj = resp[@"timingIdentifier"];
+        NSString *timingId = nil;
+        if ([timingIdObj isKindOfClass:[NSString class]]) timingId = timingIdObj;
+        else if ([timingIdObj isKindOfClass:[NSNumber class]]) timingId = [timingIdObj stringValue];
+        if (!timingId.length) return;
 
         // sign 校验：请求原文里的 sign 必须和入队时的 sign 一致。
         // 自己发的群红包没有 sign，DK 那里跳过校验；Phase 6 不抢自己的，
