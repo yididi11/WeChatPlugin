@@ -1,0 +1,34 @@
+name: Build WeChatPlugin
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Theos
+        run: |
+          git clone --recursive https://github.com/theos/theos.git $HOME/theos
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+          # Theos 需要的 SDK 会自动处理，首次编译较慢是正常的
+
+      - name: Build dylib
+        run: |
+          cd WeChatPlugin
+          make package
+          ls -lh .theos/obj/debug/ || ls -lh .theos/obj/ || true
+          find .theos -name "*.dylib" -o -name "*.deb" | head -20
+
+      - name: Upload dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: WeChatPlugin-dylib
+          path: |
+            WeChatPlugin/.theos/obj/debug/*.dylib
+            WeChatPlugin/.theos/obj/*.dylib
+            WeChatPlugin/packages/*.deb
+          if-no-files-found: warn
