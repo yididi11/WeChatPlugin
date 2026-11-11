@@ -19,6 +19,7 @@
 
 #import <UIKit/UIKit.h>
 #import <substrate.h>
+#import <objc/runtime.h>
 
 
 // =========================================================================
@@ -235,7 +236,10 @@ static void WCPSetPreventRevokeEnabled(BOOL enabled) {
 
 - (void)reloadTableData {
     %orig;
-    WCTableViewManager *tableViewMgr = MSHookIvar<id>(self, "m_tableViewMgr");
+    // 用系统 runtime 直接读 ivar：Theos 自带的 substrate.h 里没有 MSHookIvar，
+    // 改用 object_getIvar 就不依赖它了。m_tableViewMgr 在 8.0.79 里仍在
+    //（NewSettingViewController.h:11）。
+    WCTableViewManager *tableViewMgr = object_getIvar(self, class_getInstanceVariable([self class], "m_tableViewMgr"));
     if (!tableViewMgr || tableViewMgr.sections.count == 0) return;
     UITableView *tableView = [tableViewMgr getTableView];
     WCTableViewNormalCellManager *newCell =
