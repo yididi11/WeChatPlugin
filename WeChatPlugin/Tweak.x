@@ -67,7 +67,7 @@
 //   不同时领默认开；其余新开关默认关。AI 回复和转发领取结果本次不做
 //   （AI 需后端服务；转发需选目标），页里不放这两个开关。主设置页保留
 //   "自动抢红包"快速开关，下面加一行"红包设置"跳转新页；"选择群聊/私聊"
-//   移到新页里作"指定对象"行。版本号升到 HBG · Phase 7。
+//   移到新页里作"指定对象"行。版本号升到 HBG · Phase 7.1（构建 #19 失败后的修复版）。
 //
 // Phase 3.1 的修复原样保留：逻辑/物理分区换算用 >=、格式分区标题显式返回 nil、
 // 开关拨动和收起/展开一律 reloadData（绝不用 insert/deleteSections/Rows）。
@@ -1539,7 +1539,16 @@ static UIViewController *WCPTopViewController(void) {
                 if ([windows isKindOfClass:[NSArray class]] && windows.count) { frontWindow = windows.firstObject; break; }
             }
         }
-        if (!frontWindow) frontWindow = [[app windows] firstObject];
+        // 兜底：不要求前台活跃，任一 UIWindowScene 的第一个 window（不用已废弃的
+        // [UIApplication windows]，构建 #19 报 -Wdeprecated-declarations）。
+        if (!frontWindow && [app respondsToSelector:@selector(connectedScenes)]) {
+            for (id scene in app.connectedScenes) {
+                if (![scene isKindOfClass:objc_getClass("UIWindowScene")]) continue;
+                NSArray *windows = nil;
+                if ([scene respondsToSelector:@selector(windows)]) windows = [scene windows];
+                if ([windows isKindOfClass:[NSArray class]] && windows.count) { frontWindow = windows.firstObject; break; }
+            }
+        }
         UIViewController *vc = frontWindow.rootViewController;
         while (vc.presentedViewController) vc = vc.presentedViewController;
         return vc;
@@ -2057,8 +2066,12 @@ static UIColor *WCPRedPacketPinkColor(void) {
 
 static const char kWCPRedPacketSwitchKey = 0;
 
-// 前置声明：领红包日志页（定义在红包设置页后面），红包设置页的 didSelectRow 里跳转用。
-@class WCPRedPacketLogViewController;
+// 前置声明：领红包日志页的完整接口（原在红包设置页后面，构建 #19 报错
+// receiver 是 forward declaration；接口移到前面，@implementation 仍在原处）。
+@interface WCPRedPacketLogViewController : UIViewController <UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic, strong) UITableView *tableView;
+@property (nonatomic, strong) NSArray *entries; // 最新在前
+@end
 
 @interface WCPRedPacketSettingsViewController : UIViewController <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) UITableView *tableView;
@@ -2445,11 +2458,7 @@ static NSString *WCPHBLogTimeString(unsigned int unixTime) {
     return (year == thisYear) ? [fmt stringFromDate:date] : [oldFmt stringFromDate:date];
 }
 
-@interface WCPRedPacketLogViewController : UIViewController <UITableViewDataSource, UITableViewDelegate>
-@property (nonatomic, strong) UITableView *tableView;
-@property (nonatomic, strong) NSArray *entries; // 最新在前
-@end
-
+// @interface 已移到前面（红包设置页之前），这里只留 @implementation。
 @implementation WCPRedPacketLogViewController
 
 - (void)viewDidLoad {
@@ -2907,7 +2916,7 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     } else {
         if (indexPath.row == 0) {
             cell.textLabel.text = @"当前版本";
-            cell.detailTextLabel.text = @"HBG · Phase 7 · 适配微信 8.0.79";
+            cell.detailTextLabel.text = @"HBG · Phase 7.1 · 适配微信 8.0.79";
         } else {
             cell.textLabel.text = @"来源";
             cell.detailTextLabel.text = @"移植自 DKWechatHelper v1.1.0";
