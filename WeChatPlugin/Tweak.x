@@ -1,4 +1,4 @@
-// WeChatPlugin — Phase 5：自定义模板和自定义颜色改成弹窗输入（适配微信 8.0.79）
+// WeChatPlugin — Phase 5.1：输入弹窗改成 iOS 27 液态玻璃风格 + 小巧精致尺寸（适配微信 8.0.79）
 //
 // 在 Phase 4 的基础上只做一件事：
 //   1. 设置页格式分区第 1 行（自定义格式）和第 6 行（自定义颜色）不再是内联
@@ -15,6 +15,9 @@
 //      delegate 保存、键盘收起逻辑）全部删除，不留死代码；WCPNormalizeHexColor、
 //      WCPSetRevokeNoticeColorHex、模板存取函数保留。行数不变：格式分区展开
 //      仍是 7 行、收起仍是 1 行；版本号升到 HBG · Phase 5。
+// Phase 5.1：弹窗外观改成液态玻璃（真玻璃运行时查 + 模糊回退），尺寸收小
+//   （卡片宽＝屏宽 − 88、上限 340；模板输入框 88pt；留白和字号收紧；按钮行 38pt
+//   玻璃胶囊）；行为一字未改。版本号升到 HBG · Phase 5.1。
 //
 // Phase 3.1 的修复原样保留：逻辑/物理分区换算用 >=、格式分区标题显式返回 nil、
 // 开关拨动和收起/展开一律 reloadData（绝不用 insert/deleteSections/Rows）。
@@ -28,6 +31,7 @@
 
 #import <UIKit/UIKit.h>
 #import <substrate.h>
+#import <objc/message.h>
 #import <objc/runtime.h>
 
 
@@ -482,6 +486,100 @@ static void WCPApplyNoticeColorToCell(SystemMessageCellView *cellView) {
 // 输入弹窗 —— 纯 UIKit 的自定义 modal VC（半透明遮罩 + 圆角白卡片）。
 //
 // 用途：设置页第 1 行（自定义格式，多行输入）和第 6 行（自定义颜色，单行输入）
+// =========================================================================
+// 液态玻璃（Phase 5.1）：弹窗卡片、按钮都做成 iOS 27 Liquid Glass 质感。
+//
+// 实现分两层，缺一不可：
+//   1. 真玻璃：iOS 26+ 的 UIGlassEffect（UIVisualEffect 的子类），只能运行时查
+//      类——构建机的 SDK 未必有这个符号，代码里绝不能直接写 UIGlassEffect /
+//      UIGlassContainerView / UIGlassEffectStyle 这些名字（否则编译或链接失败，
+//      和之前直接写 [WeChatClass class] 导致第 8 次构建失败是同类问题）。
+//      查法：NSClassFromString(@"UIGlassEffect")，依次试 +glassEffect、
+//      +glassEffectWithStyle:（0＝Regular）、[[alloc] init]，拿到后验证它确实
+//      是 UIVisualEffect 的实例再用；全部包在 @try/@catch 里，任何一步不对就
+//      掉到第 2 层。带 tint 的（保存按钮）再试 setTintColor:（同样先
+//      respondsToSelector 再调）。
+//   2. 模糊回退：没有真玻璃的系统（iOS 26 之前，或运行时查不到）用
+//      UIBlurEffect systemUltraThinMaterial（卡片，透得更多、更像玻璃）或
+//      systemMaterial（按钮），再叠白半透明描边 + 阴影，同样是磨砂玻璃观感。
+// 注意：UIGlassContainerView（把多个玻璃面拼成一片折射）这里故意不用——
+// 弹窗只有一张玻璃卡片，不需要分组折射；UIVisualEffectView + UIGlassEffect
+// 是 Apple 给 UIKit 的标准做法。
+// =========================================================================
+
+// 返回一块液态玻璃效果：有真玻璃就用真玻璃，没有就回退到磨砂模糊。
+// tinted＝YES 时（保存按钮）尽量给玻璃带一点主题色 tint。
+static UIVisualEffect *WCPGlassEffect(BOOL tinted) {
+    Class glassCls = NSClassFromString(@"UIGlassEffect");
+    if (glassCls) {
+        @try {
+            id effect = nil;
+            SEL selGlass = NSSelectorFromString(@"glassEffect");
+            if ([glassCls respondsToSelector:selGlass]) {
+                effect = ((id (*)(id, SEL))objc_msgSend)(glassCls, selGlass);
+            }
+            if (!effect) {
+                SEL selStyle = NSSelectorFromString(@"glassEffectWithStyle:");
+                if ([glassCls respondsToSelector:selStyle]) {
+                    effect = ((id (*)(id, SEL, NSInteger))objc_msgSend)(glassCls, selStyle, (NSInteger)0);
+                }
+            }
+            if (!effect) effect = [[glassCls alloc] init];
+            if (effect && [effect isKindOfClass:[UIVisualEffect class]]) {
+                if (tinted && [effect respondsToSelector:@selector(setTintColor:)]) {
+                    ((void (*)(id, SEL, id))objc_msgSend)(effect, @selector(setTintColor:), [UIColor systemBlueColor]);
+                }
+                return (UIVisualEffect *)effect;
+            }
+        } @catch (NSException *e) {
+            // 查类/调方法任何一步出问题，都掉到下面的模糊回退。
+        }
+    }
+    return [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemUltraThinMaterial];
+}
+
+// 做一块圆角玻璃：UIVisualEffectView + 大圆角 + 细亮边（白半透明描边）。
+// 调用方负责把它放进合适的位置；内容一律加到返回值的 contentView 里。
+static UIVisualEffectView *WCPMakeGlassView(CGFloat cornerRadius, BOOL tinted) {
+    UIVisualEffectView *glass = [[UIVisualEffectView alloc] initWithEffect:WCPGlassEffect(tinted)];
+    glass.layer.cornerRadius = cornerRadius;
+    glass.layer.masksToBounds = YES;
+    glass.layer.borderWidth = 1;
+    glass.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.35].CGColor;
+    return glass;
+}
+
+// 做一颗玻璃胶囊按钮：底是圆角玻璃（保存按钮带主题色 tint），字在上面。
+// tinted＝YES 时：真玻璃走效果自身的 tintColor；回退模糊时补一块
+// systemBlue 18% 透明的色块（真玻璃不用补，isKindOfClass 能分出来）。
+static UIButton *WCPMakeGlassCapsuleButton(NSString *title, BOOL tinted, BOOL bold, id target, SEL action) {
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
+    button.backgroundColor = [UIColor clearColor];
+    button.layer.cornerRadius = 19; // 按钮行高 38 的一半，胶囊。
+    button.layer.masksToBounds = YES;
+
+    UIVisualEffectView *glass = WCPMakeGlassView(19, tinted);
+    glass.frame = button.bounds;
+    glass.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    glass.userInteractionEnabled = NO;
+    [button insertSubview:glass atIndex:0];
+
+    if (tinted && ![glass.effect isKindOfClass:NSClassFromString(@"UIGlassEffect")]) {
+        // 回退模糊：补主题色（真玻璃已通过 tintColor 着色，不用补）。
+        UIView *tint = [[UIView alloc] initWithFrame:button.bounds];
+        tint.backgroundColor = [[UIColor systemBlueColor] colorWithAlphaComponent:0.18];
+        tint.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        tint.userInteractionEnabled = NO;
+        [glass.contentView addSubview:tint];
+    }
+
+    [button setTitle:title forState:UIControlStateNormal];
+    [button setTitleColor:(tinted ? [UIColor systemBlueColor] : [UIColor labelColor]) forState:UIControlStateNormal];
+    button.titleLabel.font = bold ? [UIFont boldSystemFontOfSize:16] : [UIFont systemFontOfSize:16];
+    [button addTarget:target action:action forControlEvents:UIControlEventTouchUpInside];
+    return button;
+}
+
 // 点按后弹出的输入框。Phase 5 之前这两处是内联在 cell 里的输入框（UITextView /
 // UITextField），用户要求改成点一下弹弹窗、在弹窗里输入。
 //
@@ -507,7 +605,9 @@ static void WCPApplyNoticeColorToCell(SystemMessageCellView *cellView) {
 @end
 
 @implementation WCPInputSheetViewController {
-    UIView *_cardView;
+    UIView *_cardView; // 外层容器：只负责圆角阴影，不裁剪。
+    UIVisualEffectView *_glassView; // 玻璃层：磨砂 + 大圆角 + 细亮边 + 裁剪。
+    UIView *_highlightView; // 顶部高光：卡片上沿 1pt 亮线，模拟玻璃边缘反光。
     UILabel *_titleLabel;
     UITextView *_textView;
     UILabel *_textViewPlaceholderLabel;
@@ -515,14 +615,14 @@ static void WCPApplyNoticeColorToCell(SystemMessageCellView *cellView) {
     UILabel *_hintLabel;
     UIButton *_cancelButton;
     UIButton *_saveButton;
-    UIView *_topDivider;
-    UIView *_middleDivider;
     CGFloat _keyboardOffset;
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.45];
+    // 遮罩比以前淡一点（0.45 → 0.30），让后面的微信页面多透出来一点，
+    // 玻璃感更明显；点遮罩空白处仍是取消。
+    self.view.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.30];
 
     // 点遮罩空白处＝取消：遮罩是一个盖满全屏的按钮，卡片是它的兄弟视图、
     // 盖在它上面，所以点卡片不会误触取消。
@@ -532,30 +632,48 @@ static void WCPApplyNoticeColorToCell(SystemMessageCellView *cellView) {
     [dimButton addTarget:self action:@selector(cancelTapped) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:dimButton];
 
+    // 外层容器：透明，只挂圆角阴影（阴影不能和裁剪同层，用 shadowPath 画圆角影）。
     UIView *card = [[UIView alloc] init];
-    card.backgroundColor = [UIColor systemBackgroundColor];
-    card.layer.cornerRadius = 16;
-    card.clipsToBounds = YES;
+    card.backgroundColor = [UIColor clearColor];
+    card.layer.shadowColor = [UIColor blackColor].CGColor;
+    card.layer.shadowOpacity = 0.25;
+    card.layer.shadowRadius = 20;
+    card.layer.shadowOffset = CGSizeMake(0, 10);
     [self.view addSubview:card];
     _cardView = card;
 
+    // 玻璃层：真玻璃（运行时查）或磨砂模糊回退；大圆角 28、细亮边。
+    UIVisualEffectView *glass = WCPMakeGlassView(28, NO);
+    [card addSubview:glass];
+    _glassView = glass;
+
+    // 顶部高光：1pt 白亮线，放在玻璃的 contentView 里（会被圆角裁剪，不会冒出去）。
+    UIView *highlight = [[UIView alloc] init];
+    highlight.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.35];
+    [glass.contentView addSubview:highlight];
+    _highlightView = highlight;
+
+    // 下面所有内容都加到玻璃的 contentView 里（在磨砂上面，不在磨砂后面）。
+    UIView *content = glass.contentView;
+
     UILabel *titleLabel = [[UILabel alloc] init];
     titleLabel.text = self.sheetTitle;
-    titleLabel.font = [UIFont boldSystemFontOfSize:17];
+    titleLabel.font = [UIFont boldSystemFontOfSize:16];
     titleLabel.textColor = [UIColor labelColor];
     titleLabel.textAlignment = NSTextAlignmentCenter;
-    [card addSubview:titleLabel];
+    [content addSubview:titleLabel];
     _titleLabel = titleLabel;
 
     if (self.multiline) {
         UITextView *tv = [[UITextView alloc] init];
         tv.font = [UIFont systemFontOfSize:16];
         tv.textColor = [UIColor labelColor];
-        tv.backgroundColor = [UIColor clearColor];
+        // 玻璃输入框：半透明底 + 细亮边 + 圆角（不再是灰边白底）。
+        tv.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.10];
         tv.textContainerInset = UIEdgeInsetsMake(8, 6, 8, 6);
-        tv.layer.borderColor = [UIColor systemGray4Color].CGColor;
+        tv.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.30].CGColor;
         tv.layer.borderWidth = 1;
-        tv.layer.cornerRadius = 8;
+        tv.layer.cornerRadius = 12;
         tv.text = self.initialText ?: @"";
         tv.delegate = self;
         // 回车即换行，收键盘靠键盘上方的“完成”按钮（沿用以前内联输入框的做法）。
@@ -564,7 +682,7 @@ static void WCPApplyNoticeColorToCell(SystemMessageCellView *cellView) {
         UIBarButtonItem *done = [[UIBarButtonItem alloc] initWithTitle:@"完成" style:UIBarButtonItemStyleDone target:self action:@selector(doneEditing)];
         toolbar.items = @[flex, done];
         tv.inputAccessoryView = toolbar;
-        [card addSubview:tv];
+        [content addSubview:tv];
         _textView = tv;
 
         UILabel *placeholder = [[UILabel alloc] init];
@@ -579,7 +697,14 @@ static void WCPApplyNoticeColorToCell(SystemMessageCellView *cellView) {
         UITextField *field = [[UITextField alloc] init];
         field.font = [UIFont systemFontOfSize:16];
         field.textColor = [UIColor labelColor];
-        field.borderStyle = UITextBorderStyleRoundedRect;
+        // 玻璃输入框：不用系统圆角边框（不透明），改半透明底 + 细亮边 + 圆角。
+        field.borderStyle = UITextBorderStyleNone;
+        field.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.10];
+        field.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.30].CGColor;
+        field.layer.borderWidth = 1;
+        field.layer.cornerRadius = 12;
+        field.leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 10, 0)];
+        field.leftViewMode = UITextFieldViewModeAlways;
         field.placeholder = self.placeholderText;
         field.text = self.initialText ?: @"";
         field.autocapitalizationType = UITextAutocapitalizationTypeAllCharacters;
@@ -588,43 +713,26 @@ static void WCPApplyNoticeColorToCell(SystemMessageCellView *cellView) {
         field.returnKeyType = UIReturnKeyDone;
         field.clearButtonMode = UITextFieldViewModeWhileEditing;
         field.delegate = self;
-        [card addSubview:field];
+        [content addSubview:field];
         _textField = field;
     }
 
     UILabel *hintLabel = [[UILabel alloc] init];
     hintLabel.text = self.hintText;
-    hintLabel.font = [UIFont systemFontOfSize:12];
+    hintLabel.font = [UIFont systemFontOfSize:11];
     hintLabel.textColor = [UIColor secondaryLabelColor];
     hintLabel.numberOfLines = 0;
-    [card addSubview:hintLabel];
+    [content addSubview:hintLabel];
     _hintLabel = hintLabel;
 
-    // 底部按钮行：取消 | 保存，上面一条横线、中间一条竖线（像系统弹窗）。
-    UIView *topDivider = [[UIView alloc] init];
-    topDivider.backgroundColor = [UIColor systemGray4Color];
-    [card addSubview:topDivider];
-    _topDivider = topDivider;
-
-    UIView *middleDivider = [[UIView alloc] init];
-    middleDivider.backgroundColor = [UIColor systemGray4Color];
-    [card addSubview:middleDivider];
-    _middleDivider = middleDivider;
-
-    UIButton *cancel = [UIButton buttonWithType:UIButtonTypeSystem];
-    [cancel setTitle:@"取消" forState:UIControlStateNormal];
-    [cancel setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
-    cancel.titleLabel.font = [UIFont systemFontOfSize:17];
-    [cancel addTarget:self action:@selector(cancelTapped) forControlEvents:UIControlEventTouchUpInside];
-    [card addSubview:cancel];
+    // 底部按钮行：两颗玻璃胶囊（取消中性、保存带主题色 tint），中间留空隙，
+    // 不再是左右分半 + 分隔线的系统弹窗样式。
+    UIButton *cancel = WCPMakeGlassCapsuleButton(@"取消", NO, NO, self, @selector(cancelTapped));
+    [content addSubview:cancel];
     _cancelButton = cancel;
 
-    UIButton *save = [UIButton buttonWithType:UIButtonTypeSystem];
-    [save setTitle:@"保存" forState:UIControlStateNormal];
-    [save setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
-    save.titleLabel.font = [UIFont boldSystemFontOfSize:17];
-    [save addTarget:self action:@selector(saveTapped) forControlEvents:UIControlEventTouchUpInside];
-    [card addSubview:save];
+    UIButton *save = WCPMakeGlassCapsuleButton(@"保存", YES, YES, self, @selector(saveTapped));
+    [content addSubview:save];
     _saveButton = save;
 
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillShow:) name:UIKeyboardWillShowNotification object:nil];
@@ -642,26 +750,30 @@ static void WCPApplyNoticeColorToCell(SystemMessageCellView *cellView) {
     else [_textField becomeFirstResponder];
 }
 
+// 小巧精致尺寸（Phase 5.1）：卡片宽＝屏宽 − 88、上限 340；内边距 16；
+// 标题 20pt（字号 16）→ 间距 12 → 输入框（模板 88pt / 颜色 44pt）→
+// 间距 6 → 提示小字（字号 11）→ 间距 12 → 按钮行 38pt（两颗玻璃胶囊，
+// 中间留 12 空隙）→ 底边 16。模板输入框 88pt 至少能看三行字，够用。
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     CGFloat viewW = self.view.bounds.size.width;
     CGFloat viewH = self.view.bounds.size.height;
-    CGFloat cardW = MIN(viewW - 48, 420);
-    CGFloat pad = 20;
+    CGFloat cardW = MIN(viewW - 88, 340);
+    CGFloat pad = 16;
     CGFloat y = pad;
 
-    _titleLabel.frame = CGRectMake(pad, y, cardW - pad * 2, 24);
-    y += 24 + 12;
+    _titleLabel.frame = CGRectMake(pad, y, cardW - pad * 2, 20);
+    y += 20 + 12;
 
     if (self.multiline) {
-        _textView.frame = CGRectMake(pad, y, cardW - pad * 2, 120);
+        _textView.frame = CGRectMake(pad, y, cardW - pad * 2, 88);
         _textViewPlaceholderLabel.frame = CGRectMake(10, 8, _textView.bounds.size.width - 20, 44);
-        y += 120;
+        y += 88;
     } else {
         _textField.frame = CGRectMake(pad, y, cardW - pad * 2, 44);
         y += 44;
     }
-    y += 8;
+    y += 6;
 
     CGFloat hintW = cardW - pad * 2;
     CGRect hintRect = [_hintLabel.text boundingRectWithSize:CGSizeMake(hintW, 100)
@@ -670,21 +782,26 @@ static void WCPApplyNoticeColorToCell(SystemMessageCellView *cellView) {
                                                      context:nil];
     CGFloat hintH = ceil(CGRectGetHeight(hintRect));
     _hintLabel.frame = CGRectMake(pad, y, hintW, hintH);
-    y += hintH + 16;
+    y += hintH + 12;
 
     // 按钮行在卡片坐标里（y 是卡片内的纵坐标）。
     CGFloat buttonRowY = y;
-    y += 44 + pad;
+    y += 38 + pad;
     CGFloat cardH = y;
     CGFloat cardX = (viewW - cardW) / 2;
     CGFloat cardY = (viewH - cardH) / 2 - _keyboardOffset;
     if (cardY < 20) cardY = 20;
     _cardView.frame = CGRectMake(cardX, cardY, cardW, cardH);
 
-    _topDivider.frame = CGRectMake(0, buttonRowY, cardW, 0.5);
-    _cancelButton.frame = CGRectMake(0, buttonRowY + 0.5, cardW / 2, 44);
-    _middleDivider.frame = CGRectMake(cardW / 2 - 0.25, buttonRowY, 0.5, 44);
-    _saveButton.frame = CGRectMake(cardW / 2, buttonRowY + 0.5, cardW / 2, 44);
+    // 玻璃层铺满卡片，圆角阴影按卡片形状画；顶部高光线压在卡片上沿。
+    _glassView.frame = _cardView.bounds;
+    _cardView.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:_cardView.bounds cornerRadius:28].CGPath;
+    _highlightView.frame = CGRectMake(28, 0, cardW - 56, 1);
+
+    // 两颗玻璃胶囊：各占一半减去中间空隙，高 38。
+    CGFloat buttonW = (cardW - pad * 2 - 12) / 2;
+    _cancelButton.frame = CGRectMake(pad, buttonRowY, buttonW, 38);
+    _saveButton.frame = CGRectMake(pad + buttonW + 12, buttonRowY, buttonW, 38);
 }
 
 // 键盘弹出时把卡片往上顶，保证输入框不被键盘遮住。
@@ -1092,7 +1209,7 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     } else {
         if (indexPath.row == 0) {
             cell.textLabel.text = @"当前版本";
-            cell.detailTextLabel.text = @"HBG · Phase 5 · 适配微信 8.0.79";
+            cell.detailTextLabel.text = @"HBG · Phase 5.1 · 适配微信 8.0.79";
         } else {
             cell.textLabel.text = @"来源";
             cell.detailTextLabel.text = @"移植自 DKWechatHelper v1.1.0";
