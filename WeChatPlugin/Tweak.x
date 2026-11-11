@@ -6,8 +6,8 @@
 // 详见同目录 phase1-NOTES.md。
 //
 // 包含：
-//   1. %ctor：微信启动 2 秒后弹“插件已加载”（沿用入门架子的写法，connectedScenes
-//      取窗口，不用已废弃的 keyWindow）。
+//   1. 无加载弹窗：插件静默加载（用户要求去掉），
+//      确认加载成功的方法是进微信设置看有没有“汉伯格”那一行。
 //   2. 设置入口：在 NewSettingViewController reloadTableData 里加一行“汉伯格”，
 //      点进设置页（WCPSettingsViewController，纯 UIKit 实现）。
 //   3. 消息防撤回：hook CMessageMgr onNewSyncNotAddDBMessage:，解析撤回 sysmsg，
@@ -345,37 +345,6 @@ static void WCPSetPreventRevokeEnabled(BOOL enabled) {
 
 
 // =========================================================================
-// %ctor：加载成功标志 —— 微信启动 2 秒后弹“插件已加载”。
-// 沿用入门架子的写法（connectedScenes 取窗口，不用已废弃的 keyWindow）。
+// 加载弹窗已按用户要求去掉：插件静默加载，不再弹任何提示。
+// 想确认插件是否加载成功，进微信设置看有没有“汉伯格”那一行。
 // =========================================================================
-
-%ctor {
-    @autoreleasepool {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            UIWindow *window = nil;
-            // iOS 13+ 取窗口的兼容写法
-            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                if (scene.activationState == UISceneActivationStateForegroundActive && [scene isKindOfClass:[UIWindowScene class]]) {
-                    window = ((UIWindowScene *)scene).windows.firstObject;
-                    break;
-                }
-            }
-            if (!window) {
-                for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                    if ([scene isKindOfClass:[UIWindowScene class]]) {
-                        window = ((UIWindowScene *)scene).windows.firstObject;
-                        break;
-                    }
-                }
-            }
-            UIViewController *root = window.rootViewController;
-            if (!root) return;
-
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"汉伯格已加载"
-                                                                           message:@"HBG 插件测试成功，注入流程跑通了。"
-                                                                    preferredStyle:UIAlertControllerStyleAlert];
-            [alert addAction:[UIAlertAction actionWithTitle:@"好的" style:UIAlertActionStyleDefault handler:nil]];
-            [root presentViewController:alert animated:YES completion:nil];
-        });
-    }
-}
