@@ -256,7 +256,9 @@ static NSNumber *WCPNoticeMapGet(NSString *key) {
 
 - (void)handleNoticeTap:(UITapGestureRecognizer *)recognizer {
     UIView *tappedView = recognizer.view;
-    if (![tappedView isKindOfClass:[SystemMessageCellView class]]) return;
+    // 注意：不能写 [SystemMessageCellView class]——微信的类构建时不存在，
+    // 链接器会报 _OBJC_CLASS_$_SystemMessageCellView 找不到；用运行时查类。
+    if (![tappedView isKindOfClass:objc_getClass("SystemMessageCellView")]) return;
     SystemMessageCellView *cellView = (SystemMessageCellView *)tappedView;
     // 点按时才读当前 viewModel：cell 会复用，挂手势时读到的 wrap 可能是旧的。
     CMessageWrap *noticeWrap = cellView.viewModel.messageWrap;
@@ -266,7 +268,8 @@ static NSNumber *WCPNoticeMapGet(NSString *key) {
     // 所以一定是同会话跳转，不需要跨会话打开）。
     BaseMsgContentViewController *chatVC = nil;
     for (UIResponder *r = cellView; r; r = r.nextResponder) {
-        if ([r isKindOfClass:[BaseMsgContentViewController class]]) {
+        // 同上：微信类只能运行时查，写 [BaseMsgContentViewController class] 会链接失败。
+        if ([r isKindOfClass:objc_getClass("BaseMsgContentViewController")]) {
             chatVC = (BaseMsgContentViewController *)r;
             break;
         }
