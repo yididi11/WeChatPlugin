@@ -8,10 +8,10 @@
 // 包含：
 //   1. %ctor：微信启动 2 秒后弹“插件已加载”（沿用入门架子的写法，connectedScenes
 //      取窗口，不用已废弃的 keyWindow）。
-//   2. 设置入口：在 NewSettingViewController reloadTableData 里加一行“微信小助手”，
+//   2. 设置入口：在 NewSettingViewController reloadTableData 里加一行“汉伯格”，
 //      点进设置页（WCPSettingsViewController，纯 UIKit 实现）。
 //   3. 消息防撤回：hook CMessageMgr onNewSyncNotAddDBMessage:，解析撤回 sysmsg，
-//      取回原消息后插一条本地拦截提示。默认开启，设置页开关控制。
+//      取回原消息后插一条本地拦截提示。默认关闭，设置页开关控制。
 //
 // 不包含（后续阶段再做）：自动抢红包、步数、小游戏、CallKit、朋友圈转发、集赞、
 // 好友检测、动态背景/启动图、反检测层。也不含 DK 的 CaptainHook、Cycript、Trace、
@@ -91,14 +91,14 @@
 
 // =========================================================================
 // 开关存储 —— NSUserDefaults，key 与 DK 保持一致（"preventRevoke"），
-// 但默认开启：从未存过值时返回 YES（DK 原版默认是 NO）。
+// 但默认关闭：从未存过值时返回 NO（DK 原版默认也是 NO；本项目所有功能默认关闭）。
 // =========================================================================
 
 static NSString * const kWCPPreventRevokeKey = @"preventRevoke";
 
 static BOOL WCPPreventRevokeEnabled(void) {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    if ([defaults objectForKey:kWCPPreventRevokeKey] == nil) return YES;
+    if ([defaults objectForKey:kWCPPreventRevokeKey] == nil) return NO;
     return [defaults boolForKey:kWCPPreventRevokeKey];
 }
 
@@ -122,7 +122,7 @@ static void WCPSetPreventRevokeEnabled(BOOL enabled) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"微信小助手";
+    self.title = @"汉伯格";
     self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
 
     UITableView *tableView = [[UITableView alloc] initWithFrame:self.view.bounds
@@ -197,7 +197,7 @@ static void WCPSetPreventRevokeEnabled(BOOL enabled) {
     } else {
         if (indexPath.row == 0) {
             cell.textLabel.text = @"当前版本";
-            cell.detailTextLabel.text = @"Phase 1 · 适配微信 8.0.79";
+            cell.detailTextLabel.text = @"HBG · Phase 1 · 适配微信 8.0.79";
         } else {
             cell.textLabel.text = @"来源";
             cell.detailTextLabel.text = @"移植自 DKWechatHelper v1.1.0";
@@ -225,7 +225,7 @@ static void WCPSetPreventRevokeEnabled(BOOL enabled) {
 
 // =========================================================================
 // Hook 2：设置入口 —— NewSettingViewController reloadTableData 里加一行
-// “微信小助手”，点进 WCPSettingsViewController。
+// “汉伯格”，点进 WCPSettingsViewController。
 // 改动（相对 DK）：
 //   - normalCellForSel 改用 8.0.79 真实存在的四参数版（accessoryType: 1，带箭头）；
 //   - 跳转改用系统标准 pushViewController:animated:，不用 DK 自带头文件里声明的
@@ -245,7 +245,7 @@ static void WCPSetPreventRevokeEnabled(BOOL enabled) {
     WCTableViewNormalCellManager *newCell =
         [%c(WCTableViewNormalCellManager) normalCellForSel:@selector(openWCPSettings)
                                                      target:self
-                                                      title:@"微信小助手"
+                                                      title:@"汉伯格"
                                               accessoryType:1];
     [((WCTableViewSectionManager *)tableViewMgr.sections[0]) addCell:newCell];
     [tableView reloadData];
@@ -371,8 +371,8 @@ static void WCPSetPreventRevokeEnabled(BOOL enabled) {
             UIViewController *root = window.rootViewController;
             if (!root) return;
 
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"插件已加载"
-                                                                           message:@"WeChat 插件测试成功，注入流程跑通了。"
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"汉伯格已加载"
+                                                                           message:@"HBG 插件测试成功，注入流程跑通了。"
                                                                     preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"好的" style:UIAlertActionStyleDefault handler:nil]];
             [root presentViewController:alert animated:YES completion:nil];
