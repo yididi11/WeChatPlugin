@@ -16,6 +16,9 @@ jobs:
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
           # Theos 需要的 SDK 会自动处理，首次编译较慢是正常的
 
+      - name: Install ldid
+        run: brew install ldid
+
       - name: Build dylib
         run: |
           cd WeChatPlugin
