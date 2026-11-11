@@ -1,17 +1,20 @@
-// WeChatPlugin — Phase 4：拦截提示颜色改用十六进制代码输入（适配微信 8.0.79）
+// WeChatPlugin — Phase 5：自定义模板和自定义颜色改成弹窗输入（适配微信 8.0.79）
 //
-// 在 Phase 3.1 的基础上只做一件事：
-//   1. 删掉 Phase 3 加的那排 6 个预设色点（默认灰/红/橙/绿/蓝/紫全部取消，
-//      相关 UI 和代码全部删除，不留任何色点）；颜色只通过“自定义颜色”一行的
-//      十六进制输入框来改。格式分区展开时仍是 7 行，第 6 行就是这行输入框。
-//   2. 输入框解析：去首尾空格和可选的 '#'；接受 6 位 RRGGBB（如 FFBAC6）、
-//      3 位 RGB 简写（如 FBC → FFBBCC）、8 位 AARRGGBB（前两位透明度，取后
-//      6 位作颜色）；大小写不敏感。其他长度或含非十六进制字符一律非法，
-//      不保存、不应用、不闪退，输入框恢复成已存值并在行内小字里提示格式。
-//      注意：用户举例的 FFFBAC6 是 7 位，属于非法输入，会被拒绝并提示。
-//   3. 合法值统一存已有 key "revokeNoticeColor"（#RRGGBB 格式），不用新 key；
-//      现有的上色逻辑（TextStyle oTextColor/oDrawColor + RichTextView
-//      oTextColor）不用动；版本号升到 HBG · Phase 4。
+// 在 Phase 4 的基础上只做一件事：
+//   1. 设置页格式分区第 1 行（自定义格式）和第 6 行（自定义颜色）不再是内联
+//      输入框，改成展示行（标题 + 当前值副标题 + 右箭头），点按弹出输入弹窗，
+//      在弹窗里输入。弹窗是纯 UIKit 的自定义 modal VC（半透明遮罩 + 圆角白
+//      卡片），模板和颜色共用同一个弹窗骨架；不用 UIAlertController（它只
+//      适合塞单行输入框，多行输入框放不进去）。
+//   2. 模板弹窗：多行输入框（预填当前模板，回车即换行）+ 占位符说明小字，
+//      底部“取消”/“保存”；保存时任何内容都合法，留空＝默认格式。
+//   3. 颜色弹窗：单行输入框（预填当前颜色值）+ 格式提示小字；保存时按
+//      WCPNormalizeHexColor 校验——合法则归一化存进 "revokeNoticeColor"，
+//      留空则清除颜色恢复默认灰，非法则不关弹窗、在弹窗内红字提示格式错误。
+//   4. 内联输入框的相关代码（UITextView / UITextField 的创建、复用移动、
+//      delegate 保存、键盘收起逻辑）全部删除，不留死代码；WCPNormalizeHexColor、
+//      WCPSetRevokeNoticeColorHex、模板存取函数保留。行数不变：格式分区展开
+//      仍是 7 行、收起仍是 1 行；版本号升到 HBG · Phase 5。
 //
 // Phase 3.1 的修复原样保留：逻辑/物理分区换算用 >=、格式分区标题显式返回 nil、
 // 开关拨动和收起/展开一律 reloadData（绝不用 insert/deleteSections/Rows）。
@@ -476,15 +479,290 @@ static void WCPApplyNoticeColorToCell(SystemMessageCellView *cellView) {
 
 
 // =========================================================================
+// 输入弹窗 —— 纯 UIKit 的自定义 modal VC（半透明遮罩 + 圆角白卡片）。
+//
+// 用途：设置页第 1 行（自定义格式，多行输入）和第 6 行（自定义颜色，单行输入）
+// 点按后弹出的输入框。Phase 5 之前这两处是内联在 cell 里的输入框（UITextView /
+// UITextField），用户要求改成点一下弹弹窗、在弹窗里输入。
+//
+// 不用 UIAlertController：UIAlertController 只适合塞单行输入框，多行输入框
+// 放不进去，而且样式改不动；自定义 VC 想怎么排就怎么排。
+//
+// 骨架共用：模板和颜色两个弹窗是同一个类，区别只在配置（标题、是否多行、
+// 占位提示、提示小字、保存回调）。
+//   - saveHandler：点“保存”时调，入参是输入框当前文字；返回 nil 表示接受
+//     （调用方已在里面存好值），弹窗关闭；返回一段错误文案表示拒绝，
+//     弹窗不关闭，错误文案在弹窗内红字显示，输入框内容保留，用户可接着改。
+//   - 取消：点“取消”或点遮罩空白处，直接关闭，不保存。
+//   - 键盘：监听 UIKeyboardWillShow/Hide，卡片上移，保证输入框不被键盘遮住。
+// =========================================================================
+
+@interface WCPInputSheetViewController : UIViewController <UITextViewDelegate, UITextFieldDelegate>
+@property (nonatomic, copy) NSString *sheetTitle;
+@property (nonatomic, assign) BOOL multiline;
+@property (nonatomic, copy) NSString *initialText;
+@property (nonatomic, copy) NSString *placeholderText;
+@property (nonatomic, copy) NSString *hintText;
+@property (nonatomic, copy) NSString *(^saveHandler)(NSString *text);
+@end
+
+@implementation WCPInputSheetViewController {
+    UIView *_cardView;
+    UILabel *_titleLabel;
+    UITextView *_textView;
+    UILabel *_textViewPlaceholderLabel;
+    UITextField *_textField;
+    UILabel *_hintLabel;
+    UIButton *_cancelButton;
+    UIButton *_saveButton;
+    UIView *_topDivider;
+    UIView *_middleDivider;
+    CGFloat _keyboardOffset;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.45];
+
+    // 点遮罩空白处＝取消：遮罩是一个盖满全屏的按钮，卡片是它的兄弟视图、
+    // 盖在它上面，所以点卡片不会误触取消。
+    UIButton *dimButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    dimButton.frame = self.view.bounds;
+    dimButton.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [dimButton addTarget:self action:@selector(cancelTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:dimButton];
+
+    UIView *card = [[UIView alloc] init];
+    card.backgroundColor = [UIColor systemBackgroundColor];
+    card.layer.cornerRadius = 16;
+    card.clipsToBounds = YES;
+    [self.view addSubview:card];
+    _cardView = card;
+
+    UILabel *titleLabel = [[UILabel alloc] init];
+    titleLabel.text = self.sheetTitle;
+    titleLabel.font = [UIFont boldSystemFontOfSize:17];
+    titleLabel.textColor = [UIColor labelColor];
+    titleLabel.textAlignment = NSTextAlignmentCenter;
+    [card addSubview:titleLabel];
+    _titleLabel = titleLabel;
+
+    if (self.multiline) {
+        UITextView *tv = [[UITextView alloc] init];
+        tv.font = [UIFont systemFontOfSize:16];
+        tv.textColor = [UIColor labelColor];
+        tv.backgroundColor = [UIColor clearColor];
+        tv.textContainerInset = UIEdgeInsetsMake(8, 6, 8, 6);
+        tv.layer.borderColor = [UIColor systemGray4Color].CGColor;
+        tv.layer.borderWidth = 1;
+        tv.layer.cornerRadius = 8;
+        tv.text = self.initialText ?: @"";
+        tv.delegate = self;
+        // 回车即换行，收键盘靠键盘上方的“完成”按钮（沿用以前内联输入框的做法）。
+        UIToolbar *toolbar = [[UIToolbar alloc] initWithFrame:CGRectMake(0, 0, 0, 44)];
+        UIBarButtonItem *flex = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemFlexibleSpace target:nil action:nil];
+        UIBarButtonItem *done = [[UIBarButtonItem alloc] initWithTitle:@"完成" style:UIBarButtonItemStyleDone target:self action:@selector(doneEditing)];
+        toolbar.items = @[flex, done];
+        tv.inputAccessoryView = toolbar;
+        [card addSubview:tv];
+        _textView = tv;
+
+        UILabel *placeholder = [[UILabel alloc] init];
+        placeholder.text = self.placeholderText;
+        placeholder.font = [UIFont systemFontOfSize:16];
+        placeholder.textColor = [UIColor placeholderTextColor];
+        placeholder.numberOfLines = 0;
+        [tv addSubview:placeholder];
+        _textViewPlaceholderLabel = placeholder;
+        placeholder.hidden = tv.text.length > 0;
+    } else {
+        UITextField *field = [[UITextField alloc] init];
+        field.font = [UIFont systemFontOfSize:16];
+        field.textColor = [UIColor labelColor];
+        field.borderStyle = UITextBorderStyleRoundedRect;
+        field.placeholder = self.placeholderText;
+        field.text = self.initialText ?: @"";
+        field.autocapitalizationType = UITextAutocapitalizationTypeAllCharacters;
+        field.autocorrectionType = UITextAutocorrectionTypeNo;
+        field.spellCheckingType = UITextSpellCheckingTypeNo;
+        field.returnKeyType = UIReturnKeyDone;
+        field.clearButtonMode = UITextFieldViewModeWhileEditing;
+        field.delegate = self;
+        [card addSubview:field];
+        _textField = field;
+    }
+
+    UILabel *hintLabel = [[UILabel alloc] init];
+    hintLabel.text = self.hintText;
+    hintLabel.font = [UIFont systemFontOfSize:12];
+    hintLabel.textColor = [UIColor secondaryLabelColor];
+    hintLabel.numberOfLines = 0;
+    [card addSubview:hintLabel];
+    _hintLabel = hintLabel;
+
+    // 底部按钮行：取消 | 保存，上面一条横线、中间一条竖线（像系统弹窗）。
+    UIView *topDivider = [[UIView alloc] init];
+    topDivider.backgroundColor = [UIColor systemGray4Color];
+    [card addSubview:topDivider];
+    _topDivider = topDivider;
+
+    UIView *middleDivider = [[UIView alloc] init];
+    middleDivider.backgroundColor = [UIColor systemGray4Color];
+    [card addSubview:middleDivider];
+    _middleDivider = middleDivider;
+
+    UIButton *cancel = [UIButton buttonWithType:UIButtonTypeSystem];
+    [cancel setTitle:@"取消" forState:UIControlStateNormal];
+    [cancel setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
+    cancel.titleLabel.font = [UIFont systemFontOfSize:17];
+    [cancel addTarget:self action:@selector(cancelTapped) forControlEvents:UIControlEventTouchUpInside];
+    [card addSubview:cancel];
+    _cancelButton = cancel;
+
+    UIButton *save = [UIButton buttonWithType:UIButtonTypeSystem];
+    [save setTitle:@"保存" forState:UIControlStateNormal];
+    [save setTitleColor:[UIColor systemBlueColor] forState:UIControlStateNormal];
+    save.titleLabel.font = [UIFont boldSystemFontOfSize:17];
+    [save addTarget:self action:@selector(saveTapped) forControlEvents:UIControlEventTouchUpInside];
+    [card addSubview:save];
+    _saveButton = save;
+
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillShow:) name:UIKeyboardWillShowNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(keyboardWillHide:) name:UIKeyboardWillHideNotification object:nil];
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    // 弹窗一出来就弹键盘，不用再点一下输入框。
+    if (self.multiline) [_textView becomeFirstResponder];
+    else [_textField becomeFirstResponder];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    CGFloat viewW = self.view.bounds.size.width;
+    CGFloat viewH = self.view.bounds.size.height;
+    CGFloat cardW = MIN(viewW - 48, 420);
+    CGFloat pad = 20;
+    CGFloat y = pad;
+
+    _titleLabel.frame = CGRectMake(pad, y, cardW - pad * 2, 24);
+    y += 24 + 12;
+
+    if (self.multiline) {
+        _textView.frame = CGRectMake(pad, y, cardW - pad * 2, 120);
+        _textViewPlaceholderLabel.frame = CGRectMake(10, 8, _textView.bounds.size.width - 20, 44);
+        y += 120;
+    } else {
+        _textField.frame = CGRectMake(pad, y, cardW - pad * 2, 44);
+        y += 44;
+    }
+    y += 8;
+
+    CGFloat hintW = cardW - pad * 2;
+    CGRect hintRect = [_hintLabel.text boundingRectWithSize:CGSizeMake(hintW, 100)
+                                                     options:NSStringDrawingUsesLineFragmentOrigin
+                                                  attributes:@{NSFontAttributeName: _hintLabel.font}
+                                                     context:nil];
+    CGFloat hintH = ceil(CGRectGetHeight(hintRect));
+    _hintLabel.frame = CGRectMake(pad, y, hintW, hintH);
+    y += hintH + 16;
+
+    // 按钮行在卡片坐标里（y 是卡片内的纵坐标）。
+    CGFloat buttonRowY = y;
+    y += 44 + pad;
+    CGFloat cardH = y;
+    CGFloat cardX = (viewW - cardW) / 2;
+    CGFloat cardY = (viewH - cardH) / 2 - _keyboardOffset;
+    if (cardY < 20) cardY = 20;
+    _cardView.frame = CGRectMake(cardX, cardY, cardW, cardH);
+
+    _topDivider.frame = CGRectMake(0, buttonRowY, cardW, 0.5);
+    _cancelButton.frame = CGRectMake(0, buttonRowY + 0.5, cardW / 2, 44);
+    _middleDivider.frame = CGRectMake(cardW / 2 - 0.25, buttonRowY, 0.5, 44);
+    _saveButton.frame = CGRectMake(cardW / 2, buttonRowY + 0.5, cardW / 2, 44);
+}
+
+// 键盘弹出时把卡片往上顶，保证输入框不被键盘遮住。
+// 按“未上移的卡片位置”算需要上移多少，这样重复收到通知也不会把偏移量清掉。
+- (void)keyboardWillShow:(NSNotification *)note {
+    CGRect kbFrame = [note.userInfo[UIKeyboardFrameEndUserInfoKey] CGRectValue];
+    CGRect kbInView = [self.view convertRect:kbFrame fromView:nil];
+    CGFloat keyboardTop = CGRectGetMinY(kbInView);
+    CGFloat cardH = CGRectGetHeight(_cardView.frame);
+    CGFloat cardYUnshifted = (CGRectGetHeight(self.view.bounds) - cardH) / 2;
+    if (cardYUnshifted < 20) cardYUnshifted = 20;
+    CGFloat need = (cardYUnshifted + cardH) - (keyboardTop - 12);
+    _keyboardOffset = MAX(0, need);
+    NSTimeInterval duration = [note.userInfo[UIKeyboardAnimationDurationUserInfoKey] doubleValue];
+    [UIView animateWithDuration:duration animations:^{
+        [self.view setNeedsLayout];
+        [self.view layoutIfNeeded];
+    }];
+}
+
+- (void)keyboardWillHide:(NSNotification *)note {
+    _keyboardOffset = 0;
+    NSTimeInterval duration = [note.userInfo[UIKeyboardAnimationDurationUserInfoKey] doubleValue];
+    [UIView animateWithDuration:duration animations:^{
+        [self.view setNeedsLayout];
+        [self.view layoutIfNeeded];
+    }];
+}
+
+- (void)cancelTapped {
+    // 取消：丢弃改动，直接关弹窗，不保存。
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)saveTapped {
+    NSString *text = self.multiline ? _textView.text : _textField.text;
+    NSString *error = self.saveHandler ? self.saveHandler(text ?: @"") : nil;
+    if (error) {
+        // 校验失败：弹窗不关，红字提示格式错误，输入框内容保留，用户可接着改。
+        _hintLabel.text = error;
+        _hintLabel.textColor = [UIColor systemRedColor];
+        [self.view setNeedsLayout];
+        return;
+    }
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)doneEditing {
+    if (self.multiline) [_textView resignFirstResponder];
+}
+
+#pragma mark - UITextViewDelegate
+
+- (void)textViewDidChange:(UITextView *)textView {
+    _textViewPlaceholderLabel.hidden = textView.text.length > 0;
+}
+
+#pragma mark - UITextFieldDelegate
+
+- (BOOL)textFieldShouldReturn:(UITextField *)textField {
+    // 单行输入框回车＝保存（和点“保存”一样走校验）。
+    [self saveTapped];
+    return NO;
+}
+
+@end
+
+
+// =========================================================================
 // 设置页 —— 纯 UIKit 的 UITableView，不依赖微信的 WCTableViewManager /
 // UiUtil / MMUIViewController，避免引入 DK 那些辅助类。
 //
 // 分区（逻辑编号）：0 消息防撤回 / 1 拦截提示格式 / 2 更多功能 / 3 关于。
 // 防撤回关闭时格式分区直接不显示（物理分区数 4→3，开关拨动时 reloadData
-// 整表重画）；格式分区内部：首行是收起/展开开关行，展开时才有编辑框、预设、
-// 恢复默认、自定义颜色（十六进制输入）；收起状态存 NSUserDefaults。
-// 点预设/恢复默认时不再整区 reload，只直接改可见 cell 的勾选状态，
-// 避免 Phase 2 的重影问题。
+// 整表重画）；格式分区内部：首行是收起/展开开关行，展开时才有自定义格式
+// 展示行、3 个预设、恢复默认、自定义颜色展示行；收起状态存 NSUserDefaults。
+// 第 1 行和第 6 行是展示行，点按弹出输入弹窗（WCPInputSheetViewController），
+// 在弹窗里输入；预设切换/恢复默认/弹窗保存后都用 reloadData 整表重画。
 // =========================================================================
 
 // 逻辑分区编号（与物理分区编号的换算见下面两个函数）。
@@ -514,12 +792,8 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     return physical;
 }
 
-@interface WCPSettingsViewController : UIViewController <UITableViewDataSource, UITableViewDelegate, UITextViewDelegate, UITextFieldDelegate>
+@interface WCPSettingsViewController : UIViewController <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) UITableView *tableView;
-@property (nonatomic, strong) UITextView *formatTextView;
-@property (nonatomic, strong) UILabel *formatPlaceholderLabel;
-@property (nonatomic, strong) UITextField *colorHexField;
-@property (nonatomic, strong) UILabel *colorHexHintLabel;
 @end
 
 @implementation WCPSettingsViewController
@@ -538,12 +812,6 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     self.tableView = tableView;
 }
 
-- (void)viewWillDisappear:(BOOL)animated {
-    [super viewWillDisappear:animated];
-    // 兜底保存：用户输完模板直接点返回，编辑结束时也会保存，这里再存一次。
-    if (self.formatTextView) WCPSetRevokeNoticeFormat(self.formatTextView.text);
-}
-
 - (void)preventRevokeSwitchChanged:(UISwitch *)sender {
     BOOL on = sender.isOn;
     BOOL wasOn = WCPPreventRevokeEnabled();
@@ -553,55 +821,29 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     // 以前这里用 insert/deleteSections，但 dataSource 映射错一个字符（见上面
     // WCPLogicalSectionForPhysical 的注释）就让一致性检查失败而闪退；动画不值得
     // 再闪退一次，改成 reloadData——整表按同一份快照重画，分区/行数不可能错位。
-    // 先收键盘：用户可能正在编辑模板或颜色代码，编辑框要被移走时先让它保存并 resign。
-    [self.formatTextView resignFirstResponder];
-    [self.colorHexField resignFirstResponder];
     [self.tableView reloadData];
 }
 
 #pragma mark - 格式设置
 
-// 只改可见 cell 的勾选，不整区 reload——Phase 2 的重影就是整区 reload 惹的。
-- (void)updateFormatCheckmarks {
-    NSInteger section = WCPPhysicalSectionForLogical(WCPSectionFormat);
-    NSString *currentTpl = WCPRevokeNoticeFormat();
-    NSArray *presets = WCPNoticeFormatPresets();
-    for (NSInteger row = 2; row <= 5; row++) {
-        UITableViewCell *cell = [self.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:row inSection:section]];
-        if (!cell) continue; // 不可见的行不用管，下次显示时 cellForRow 会按状态画
-        if (row == 5) {
-            cell.accessoryType = (currentTpl == nil) ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
-        } else {
-            NSString *tpl = presets[row - 2][@"template"];
-            cell.accessoryType = [tpl isEqualToString:currentTpl] ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
-        }
-    }
-}
-
+// 预设切换 / 恢复默认：存完直接 reloadData 整表重画。
+// Phase 5：以前这里只改可见 cell 的勾选，是为了躲
+// Phase 2 整区 reload 惹的重影；但第 1 行现在是展示行，模板变了它的副标题也
+// 要跟着变，单改勾选不够。reloadData 是整表按同一份快照重画（Phase 3.1 已
+// 验证过，开关拨动/收起展开都在用），不会触发重影那套删除+插入动画。
 - (void)applyPresetAtIndex:(NSInteger)presetIndex {
     NSArray *presets = WCPNoticeFormatPresets();
     if (presetIndex < 0 || presetIndex >= (NSInteger)presets.count) return;
-    NSString *tpl = presets[presetIndex][@"template"];
-    WCPSetRevokeNoticeFormat(tpl);
-    self.formatTextView.text = tpl;
-    self.formatPlaceholderLabel.hidden = tpl.length > 0;
-    [self.formatTextView resignFirstResponder];
-    [self.colorHexField resignFirstResponder];
-    [self updateFormatCheckmarks];
+    WCPSetRevokeNoticeFormat(presets[presetIndex][@"template"]);
+    [self.tableView reloadData];
 }
 
 - (void)resetFormatToDefault {
     WCPSetRevokeNoticeFormat(nil);
-    self.formatTextView.text = @"";
-    self.formatPlaceholderLabel.hidden = NO;
-    [self.formatTextView resignFirstResponder];
-    [self.colorHexField resignFirstResponder];
-    [self updateFormatCheckmarks];
+    [self.tableView reloadData];
 }
 
 - (void)toggleFormatExpanded {
-    [self.formatTextView resignFirstResponder];
-    [self.colorHexField resignFirstResponder];
     BOOL expanded = !WCPFormatExpanded();
     WCPSetFormatExpanded(expanded);
     // Phase 3.1：以前这里用 beginUpdates + insert/deleteRows（1..6 行）再 reloadRows
@@ -612,131 +854,60 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     [self.tableView reloadData];
 }
 
-#pragma mark - 自定义颜色（十六进制输入）
+#pragma mark - 输入弹窗
 
-// 输入框和提示小字只建一次（复用时移进 cell，与多行模板输入框同一个做法）。
-// 键盘用默认键盘；回车是“完成”，收键盘靠回车或点别处；结束编辑时提交。
-- (void)ensureColorHexField {
-    if (self.colorHexField) return;
-    UITextField *field = [[UITextField alloc] init];
-    field.font = [UIFont systemFontOfSize:16];
-    field.textColor = [UIColor labelColor];
-    field.backgroundColor = [UIColor clearColor];
-    field.placeholder = @"例如 FFBAC6";
-    field.textAlignment = NSTextAlignmentRight;
-    field.autocapitalizationType = UITextAutocapitalizationTypeAllCharacters;
-    field.autocorrectionType = UITextAutocorrectionTypeNo;
-    field.spellCheckingType = UITextSpellCheckingTypeNo;
-    field.returnKeyType = UIReturnKeyDone;
-    field.clearButtonMode = UITextFieldViewModeWhileEditing;
-    field.delegate = self;
-
-    UILabel *hint = [[UILabel alloc] init];
-    hint.text = @"请输入 6 位十六进制颜色代码，例如 FFBAC6，留空恢复默认灰色";
-    hint.font = [UIFont systemFontOfSize:12];
-    hint.textColor = [UIColor secondaryLabelColor];
-    self.colorHexHintLabel = hint;
-    self.colorHexField = field;
+// 模板输入弹窗（多行）。保存时任何内容都合法（留空＝默认格式），
+// 存完 reloadData 刷新第 1 行副标题和第 5 行勾选。
+- (void)presentFormatTemplateSheet {
+    WCPInputSheetViewController *sheet = [[WCPInputSheetViewController alloc] init];
+    sheet.sheetTitle = @"自定义格式";
+    sheet.multiline = YES;
+    sheet.initialText = WCPRevokeNoticeFormat() ?: @"";
+    sheet.placeholderText = @"例如：{名字}撤回了一条消息";
+    sheet.hintText = @"占位符：{名字}＝撤回者（自己显示“你”）；{内容}＝原消息文本（非文本消息为空）；{时间}＝原消息时间。模板支持换行，留空则使用默认格式。";
+    __weak typeof(self) weakSelf = self;
+    sheet.saveHandler = ^NSString *(NSString *text) {
+        WCPSetRevokeNoticeFormat(text);
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        [strongSelf.tableView reloadData];
+        return nil;
+    };
+    sheet.modalPresentationStyle = UIModalPresentationOverFullScreen;
+    sheet.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
+    [self presentViewController:sheet animated:YES completion:nil];
 }
 
-// 正常状态的提示小字（非法输入后会被改成红色报错，合法提交后恢复）。
-- (void)resetColorHexHint {
-    self.colorHexHintLabel.text = @"请输入 6 位十六进制颜色代码，例如 FFBAC6，留空恢复默认灰色";
-    self.colorHexHintLabel.textColor = [UIColor secondaryLabelColor];
-}
-
-// 提交输入框内容：回车确认或结束编辑时调。
-// 留空 → 清除自定义颜色，恢复默认灰；合法 → 归一化成 #RRGGBB 存进已有 key，
-// 输入框同步显示归一化后的值；非法（7 位如 FFFBAC6、含非十六进制字符等）→
-// 不保存、不应用，输入框恢复成当前已存的颜色值，提示小字变红说明格式。
-- (void)commitColorHexField {
-    if (!self.colorHexField) return;
-    NSString *trimmed = [self.colorHexField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (!trimmed.length) {
-        // 留空＝清除自定义颜色，恢复默认灰（WCPSetRevokeNoticeColorHex(nil) 会删 key）。
-        WCPSetRevokeNoticeColorHex(nil);
-        self.colorHexField.text = @"";
-        [self resetColorHexHint];
-        return;
-    }
-    NSString *normalized = WCPNormalizeHexColor(self.colorHexField.text);
-    if (!normalized) {
-        // 非法：恢复成已存值，不改任何存储。
-        self.colorHexField.text = WCPRevokeNoticeColorHex() ?: @"";
-        self.colorHexHintLabel.text = @"格式不正确，请输入 6 位十六进制颜色代码，例如 FFBAC6";
-        self.colorHexHintLabel.textColor = [UIColor systemRedColor];
-        return;
-    }
-    WCPSetRevokeNoticeColorHex(normalized);
-    self.colorHexField.text = normalized;
-    [self resetColorHexHint];
-}
-
-#pragma mark - UITextFieldDelegate
-
-- (BOOL)textFieldShouldReturn:(UITextField *)textField {
-    if (textField == self.colorHexField) {
-        [self commitColorHexField];
-        [textField resignFirstResponder];
-        return NO;
-    }
-    return YES;
-}
-
-- (void)textFieldDidEndEditing:(UITextField *)textField {
-    if (textField == self.colorHexField) {
-        [self commitColorHexField];
-    }
-}
-
-#pragma mark - 编辑框
-
-- (void)formatEditingDone {
-    [self.formatTextView resignFirstResponder];
-}
-
-// 多行输入框只建一次（复用时移进 cell，与 Phase 2 的输入框同一个做法）。
-// 回车是换行，收键盘靠键盘上方的“完成”按钮。
-- (void)ensureFormatTextView {
-    if (self.formatTextView) return;
-    UITextView *tv = [[UITextView alloc] init];
-    tv.font = [UIFont systemFontOfSize:16];
-    tv.textColor = [UIColor labelColor];
-    tv.backgroundColor = [UIColor clearColor];
-    tv.textContainerInset = UIEdgeInsetsMake(8, 4, 8, 4);
-    tv.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    tv.delegate = self;
-
-    UIToolbar *toolbar = [[UIToolbar alloc] initWithFrame:CGRectMake(0, 0, 0, 44)];
-    UIBarButtonItem *flex = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemFlexibleSpace
-                                                                          target:nil action:nil];
-    UIBarButtonItem *done = [[UIBarButtonItem alloc] initWithTitle:@"完成"
-                                                             style:UIBarButtonItemStyleDone
-                                                            target:self
-                                                            action:@selector(formatEditingDone)];
-    toolbar.items = @[flex, done];
-    tv.inputAccessoryView = toolbar;
-
-    UILabel *placeholder = [[UILabel alloc] init];
-    placeholder.text = @"自定义格式，例如：{名字}撤回了一条消息\n可换行，占位符：{名字} {内容} {时间}";
-    placeholder.font = [UIFont systemFontOfSize:16];
-    placeholder.textColor = [UIColor placeholderTextColor];
-    placeholder.numberOfLines = 0;
-    placeholder.autoresizingMask = UIViewAutoresizingFlexibleWidth;
-    [tv addSubview:placeholder];
-    self.formatPlaceholderLabel = placeholder;
-    self.formatTextView = tv;
-}
-
-#pragma mark - UITextViewDelegate
-
-- (void)textViewDidChange:(UITextView *)textView {
-    self.formatPlaceholderLabel.hidden = textView.text.length > 0;
-}
-
-- (void)textViewDidEndEditing:(UITextView *)textView {
-    WCPSetRevokeNoticeFormat(textView.text);
-    [self updateFormatCheckmarks];
+// 颜色输入弹窗（单行）。保存时按 WCPNormalizeHexColor 校验：
+// 合法 → 归一化存进 "revokeNoticeColor"；留空 → 清除颜色恢复默认灰；
+// 非法 → 返回报错文案，弹窗不关闭，在弹窗内红字提示格式错误
+// （见 WCPInputSheetViewController saveTapped）。
+- (void)presentColorHexSheet {
+    WCPInputSheetViewController *sheet = [[WCPInputSheetViewController alloc] init];
+    sheet.sheetTitle = @"自定义颜色";
+    sheet.multiline = NO;
+    sheet.initialText = WCPRevokeNoticeColorHex() ?: @"";
+    sheet.placeholderText = @"例如 FFBAC6";
+    sheet.hintText = @"请输入 6 位十六进制颜色代码，例如 FFBAC6，留空恢复默认灰色";
+    __weak typeof(self) weakSelf = self;
+    sheet.saveHandler = ^NSString *(NSString *text) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        NSString *trimmed = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (!trimmed.length) {
+            WCPSetRevokeNoticeColorHex(nil);
+            [strongSelf.tableView reloadData];
+            return nil;
+        }
+        NSString *normalized = WCPNormalizeHexColor(text);
+        if (!normalized) {
+            return @"格式不正确，请输入 6 位十六进制颜色代码，例如 FFBAC6";
+        }
+        WCPSetRevokeNoticeColorHex(normalized);
+        [strongSelf.tableView reloadData];
+        return nil;
+    };
+    sheet.modalPresentationStyle = UIModalPresentationOverFullScreen;
+    sheet.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
+    [self presentViewController:sheet animated:YES completion:nil];
 }
 
 #pragma mark - UITableViewDataSource
@@ -749,7 +920,7 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     NSInteger logical = WCPLogicalSectionForPhysical(section);
     if (logical == WCPSectionRevoke) return 1;
     if (logical == WCPSectionFormat) return WCPFormatExpanded() ? 7 : 1;
-    // 格式分区展开时的 7 行：开关行 / 编辑框 / 3 个预设 / 恢复默认 / 自定义颜色（十六进制输入）
+    // 格式分区展开时的 7 行：开关行 / 自定义格式（展示行，点按弹弹窗）/ 3 个预设 / 恢复默认 / 自定义颜色（展示行，点按弹弹窗）
     if (logical == WCPSectionMore) return 6;
     return 2;
 }
@@ -780,9 +951,9 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
     NSInteger logical = WCPLogicalSectionForPhysical(indexPath.section);
     if (logical == WCPSectionFormat) {
-        if (indexPath.row == 1) return 120; // 多行编辑框
+        if (indexPath.row == 1) return WCPRevokeNoticeFormat() ? 66 : 44; // 展示行：有模板两行，无模板一行
         if (indexPath.row >= 2 && indexPath.row <= 4) return 66; // 预设：标题 + 两行模板
-        if (indexPath.row == 6) return 64; // 自定义颜色：标题 + 输入框 + 格式提示小字
+        if (indexPath.row == 6) return 44; // 自定义颜色展示行
     }
     return 44;
 }
@@ -807,24 +978,32 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
             return cell;
         }
         if (indexPath.row == 1) {
-            // 多行编辑框（独立 reuseId；UITextView 只建一次，复用时移过来）
-            static NSString *editorReuseId = @"WCPFormatEditorCell";
-            UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:editorReuseId];
+            // 自定义格式展示行（Phase 5：内联多行输入框改成点按弹弹窗）。
+            // 副标题显示当前模板的前两行；未设置时显示“未设置，使用默认格式”。
+            // 必须用独立的 Subtitle reuseId，不和预设行混用复用池。
+            static NSString *templateReuseId = @"WCPFormatTemplateCell";
+            UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:templateReuseId];
             if (!cell) {
-                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:editorReuseId];
+                cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:templateReuseId];
+                cell.detailTextLabel.numberOfLines = 2;
+                cell.detailTextLabel.font = [UIFont systemFontOfSize:14];
             }
-            cell.selectionStyle = UITableViewCellSelectionStyleNone;
-            [self ensureFormatTextView];
-            NSString *currentTpl = WCPRevokeNoticeFormat() ?: @"";
-            if (![self.formatTextView.text isEqualToString:currentTpl]) {
-                self.formatTextView.text = currentTpl;
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            cell.textLabel.text = @"自定义格式";
+            cell.textLabel.textColor = [UIColor labelColor];
+            NSString *tpl = WCPRevokeNoticeFormat();
+            if (tpl) {
+                // 只取前两行，多余的截掉（完整内容在弹窗里改）。
+                NSArray *lines = [tpl componentsSeparatedByString:@"\n"];
+                if (lines.count > 2) {
+                    tpl = [[lines subarrayWithRange:NSMakeRange(0, 2)] componentsJoinedByString:@"\n"];
+                }
+                cell.detailTextLabel.text = tpl;
+            } else {
+                cell.detailTextLabel.text = @"未设置，使用默认格式";
             }
-            self.formatPlaceholderLabel.hidden = currentTpl.length > 0;
-            [self.formatTextView removeFromSuperview];
-            CGFloat w = cell.contentView.bounds.size.width;
-            self.formatTextView.frame = CGRectMake(12, 8, w - 24, 104);
-            self.formatPlaceholderLabel.frame = CGRectMake(9, 8, self.formatTextView.bounds.size.width - 18, 44);
-            [cell.contentView addSubview:self.formatTextView];
+            cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
             return cell;
         }
         if (indexPath.row >= 2 && indexPath.row <= 4) {
@@ -865,36 +1044,19 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
             cell.accessoryType = (WCPRevokeNoticeFormat() == nil) ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
             return cell;
         }
-        // row 6：自定义颜色（十六进制输入框 + 格式提示小字）。
-        // 输入框和提示小字只建一次，复用时移进 cell（与多行模板输入框同一个做法）；
-        // 标题是静态文字，随 cell 创建。点这行（非输入框区域）时聚焦输入框。
+        // row 6：自定义颜色展示行（Phase 5：内联单行输入框改成点按弹弹窗）。
         static NSString *colorReuseId = @"WCPFormatColorCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:colorReuseId];
         if (!cell) {
-            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:colorReuseId];
-            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-            UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 8, 90, 30)];
-            titleLabel.text = @"自定义颜色";
-            titleLabel.font = [UIFont systemFontOfSize:16];
-            titleLabel.textColor = [UIColor labelColor];
-            [cell.contentView addSubview:titleLabel];
+            cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:colorReuseId];
         }
-        [self ensureColorHexField];
-        // 不在编辑时才同步输入框内容：正在输入时别把用户正在打的字覆盖掉。
-        if (!self.colorHexField.isFirstResponder) {
-            NSString *storedHex = WCPRevokeNoticeColorHex() ?: @"";
-            if (![self.colorHexField.text isEqualToString:storedHex]) {
-                self.colorHexField.text = storedHex;
-            }
-            [self resetColorHexHint];
-        }
-        CGFloat w = cell.contentView.bounds.size.width;
-        [self.colorHexField removeFromSuperview];
-        self.colorHexField.frame = CGRectMake(110, 8, w - 126, 30);
-        [cell.contentView addSubview:self.colorHexField];
-        [self.colorHexHintLabel removeFromSuperview];
-        self.colorHexHintLabel.frame = CGRectMake(16, 40, w - 32, 16);
-        [cell.contentView addSubview:self.colorHexHintLabel];
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+        cell.textLabel.text = @"自定义颜色";
+        cell.textLabel.textColor = [UIColor labelColor];
+        NSString *storedHex = WCPRevokeNoticeColorHex();
+        cell.detailTextLabel.text = storedHex ?: @"默认灰色";
+        cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
         return cell;
     }
 
@@ -932,7 +1094,7 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     } else {
         if (indexPath.row == 0) {
             cell.textLabel.text = @"当前版本";
-            cell.detailTextLabel.text = @"HBG · Phase 4 · 适配微信 8.0.79";
+            cell.detailTextLabel.text = @"HBG · Phase 5 · 适配微信 8.0.79";
         } else {
             cell.textLabel.text = @"来源";
             cell.detailTextLabel.text = @"移植自 DKWechatHelper v1.1.0";
@@ -949,13 +1111,14 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (indexPath.row == 0) {
         [self toggleFormatExpanded];
+    } else if (indexPath.row == 1) {
+        [self presentFormatTemplateSheet];
     } else if (indexPath.row >= 2 && indexPath.row <= 4) {
         [self applyPresetAtIndex:indexPath.row - 2];
     } else if (indexPath.row == 5) {
         [self resetFormatToDefault];
     } else if (indexPath.row == 6) {
-        // 点自定义颜色行（非输入框区域）时聚焦输入框，方便直接改。
-        [self.colorHexField becomeFirstResponder];
+        [self presentColorHexSheet];
     }
 }
 
