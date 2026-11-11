@@ -1,0 +1,9 @@
+Package: com.yourname.wechatplugin
+Name: WeChatPlugin
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: WeChat 插件入门模板 - 启动弹窗测试
+Maintainer: you
+Author: you
+Section: Tweaks
+Depends: mobilesubstrate
