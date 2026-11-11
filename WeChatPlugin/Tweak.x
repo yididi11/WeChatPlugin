@@ -1,4 +1,4 @@
-// WeChatPlugin — Phase 5.1：输入弹窗改成 iOS 27 液态玻璃风格 + 小巧精致尺寸（适配微信 8.0.79）
+// WeChatPlugin — Phase 6：自动抢红包，白名单模式（适配微信 8.0.79）
 //
 // 在 Phase 4 的基础上只做一件事：
 //   1. 设置页格式分区第 1 行（自定义格式）和第 6 行（自定义颜色）不再是内联
@@ -15,9 +15,18 @@
 //      delegate 保存、键盘收起逻辑）全部删除，不留死代码；WCPNormalizeHexColor、
 //      WCPSetRevokeNoticeColorHex、模板存取函数保留。行数不变：格式分区展开
 //      仍是 7 行、收起仍是 1 行；版本号升到 HBG · Phase 5。
-// Phase 5.1：弹窗外观改成液态玻璃（真玻璃运行时查 + 模糊回退），尺寸收小
-//   （卡片宽＝屏宽 − 88、上限 340；模板输入框 88pt；留白和字号收紧；按钮行 38pt
-//   玻璃胶囊）；行为一字未改。版本号升到 HBG · Phase 5.1。
+// Phase 6：自动抢红包（白名单模式），移植自 DKWechatHelper：
+//   1. 设置页“更多功能”分区第 0 行是自动抢红包开关（默认关闭），第 1 行是
+//      “选择群聊/私聊”（点进去是白名单选择页），其余 5 行仍是“即将推出”占位。
+//   2. 白名单模式：开关打开后先不生效；只有白名单里选中的群聊/私聊的红包才抢，
+//      一个都没选就什么都不抢。白名单存 username（不用显示名，群名/备注会改）。
+//   3. 抢的链路（DK 原样）：CMessageMgr onNewSyncAddMessage: 收到 type 49 且内容
+//      含 wxpay:// 的消息 → 解析 m_oWCPayInfoItem.m_c2cNativeUrl → 查白名单 →
+//      ReceiverQueryRedEnvelopesRequest: 查询 → OnWCToHongbaoCommonResponse:
+//      （cgiCmdid==3）校验 receiveStatus/hbStatus/timingIdentifier/sign →
+//      OpenRedEnvelopesRequest: 开红包。消息本身一律走 %orig，不拦截不改消息。
+//   4. 弹窗的玻璃代码原样不动（真机上玻璃效果没出来，用户说先不管它）。
+//   版本号升到 HBG · Phase 6。
 //
 // Phase 3.1 的修复原样保留：逻辑/物理分区换算用 >=、格式分区标题显式返回 nil、
 // 开关拨动和收起/展开一律 reloadData（绝不用 insert/deleteSections/Rows）。
@@ -26,8 +35,8 @@
 // 点提示跳转、格式模板+预设+换行、不直接写 [WeChatClass class]（微信类一律
 // objc_getClass / %c 运行时查，否则链接失败）、不用 keyWindow / MSHookIvar /
 // CaptainHook / QGVAPlayer。
-// 不包含（后续阶段再做）：自动抢红包、步数、小游戏、朋友圈转发、集赞、好友检测、
-// 动态背景/启动图、反检测层。
+// 不包含（后续阶段再做）：步数、小游戏、朋友圈转发、集赞、好友检测、
+// 动态背景/启动图、反检测层、后台抢红包（第一版只做前台抢红包）。
 
 #import <UIKit/UIKit.h>
 #import <substrate.h>
@@ -53,14 +62,19 @@
 // 8.0.79 里 m_nsUsrName 等字段在父类 CBaseContact 上（CBaseContact.h:133）。
 @interface CBaseContact : NSObject
 @property (retain, nonatomic) NSString *m_nsUsrName;
+@property (retain, nonatomic) NSString *m_nsHeadImgUrl; // CBaseContact.h:119
 @end
 
 @interface CContact : CBaseContact
+- (id)getContactDisplayName; // CContact.h:326
 @end
 
 @interface CContactMgr : NSObject
-- (id)getSelfContact;
+- (id)getSelfContact; // CContactMgr.h:77
+- (id)getContactByName:(id)arg1; // CContactMgr.h:158
 @end
+
+@class WCPayInfoItem; // 完整声明在下面（红包接口区）；这里先前置声明，CMessageWrap 的属性要用它
 
 @interface CMessageWrap : NSObject
 @property (retain, nonatomic) NSString *m_nsContent;
@@ -70,11 +84,47 @@
 @property (nonatomic) unsigned int m_uiStatus;
 @property (nonatomic) unsigned int m_uiCreateTime;
 @property (nonatomic) unsigned int m_uiMesLocalID; // CMessageWrap.h:474
+@property (retain, nonatomic) WCPayInfoItem *m_oWCPayInfoItem; // CMessageWrap.h:998
 - (id)initWithMsgType:(long long)arg1;
+@end
+
+// 红包消息的支付信息（WCPayInfoItem.h:214）与会话列表、红包逻辑管理：
+// WCPayInfoItem / MMNewSessionMgr / WCBizUtil / WCRedEnvelopesLogicMgr /
+// HongBaoRes / HongBaoReq / SKBuiltinBuffer_t 的声明都以 8.0.79 头文件为准。
+@interface WCPayInfoItem : NSObject
+@property (retain, nonatomic) NSString *m_c2cNativeUrl;
+@end
+
+@interface MMNewSessionMgr : NSObject
+- (id)GetUserNamesOnSessionList; // MMNewSessionMgr.h:142
+@end
+
+@interface WCBizUtil : NSObject
++ (NSDictionary *)dictionaryWithDecodedComponets:(NSString *)components separator:(NSString *)separator; // WCBizUtil.h:157
+@end
+
+@interface WCRedEnvelopesLogicMgr : NSObject
+- (void)ReceiverQueryRedEnvelopesRequest:(id)arg1; // WCRedEnvelopesLogicMgr.h:38
+- (void)OpenRedEnvelopesRequest:(id)arg1; // WCRedEnvelopesLogicMgr.h:34
+- (void)OnWCToHongbaoCommonResponse:(id)arg1 Request:(id)arg2; // WCRedEnvelopesLogicMgr.h:73
+@end
+
+@interface SKBuiltinBuffer_t : NSObject
+@property (retain, nonatomic) NSData *buffer; // SKBuiltinBuffer_t.h:19
+@end
+
+@interface HongBaoReq : NSObject
+@property (retain, nonatomic) SKBuiltinBuffer_t *reqText; // HongBaoReq.h:21
+@end
+
+@interface HongBaoRes : NSObject
+@property (nonatomic) int cgiCmdid; // HongBaoRes.h:19
+@property (retain, nonatomic) SKBuiltinBuffer_t *retText; // HongBaoRes.h:24
 @end
 
 @interface CMessageMgr : NSObject
 - (void)onNewSyncNotAddDBMessage:(id)arg1;
+- (void)onNewSyncAddMessage:(id)arg1; // CMessageMgr.h:189
 - (id)GetMsg:(id)arg1 n64SvrID:(long long)arg2;
 - (void)AddLocalMsg:(id)arg1 MsgWrap:(id)arg2 fixTime:(BOOL)arg3 NewMsgArriveNotify:(BOOL)arg4;
 - (id)GetMsg:(id)arg1 LocalID:(unsigned int)arg2; // CMessageMgr.h:329
@@ -154,6 +204,55 @@ static BOOL WCPPreventRevokeEnabled(void) {
 static void WCPSetPreventRevokeEnabled(BOOL enabled) {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     [defaults setBool:enabled forKey:kWCPPreventRevokeKey];
+    [defaults synchronize];
+}
+
+
+// =========================================================================
+// 自动抢红包开关 + 白名单 —— NSUserDefaults（新 key "autoGrabRedPacket" /
+// "redPacketWhitelist"），全部默认关闭/为空。
+// 白名单模式（用户 2026-11-11 决定）：开关打开后先不生效；只有白名单里选中的
+// 群聊/私聊的红包才抢，一个都没选就什么都不抢。
+// 白名单存 username 数组（不用显示名：群名/备注会改，username 不变）。
+// =========================================================================
+
+static NSString * const kWCPAutoGrabRedPacketKey = @"autoGrabRedPacket";
+static NSString * const kWCPRedPacketWhitelistKey = @"redPacketWhitelist";
+
+static BOOL WCPAutoGrabRedPacketEnabled(void) {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    if ([defaults objectForKey:kWCPAutoGrabRedPacketKey] == nil) return NO;
+    return [defaults boolForKey:kWCPAutoGrabRedPacketKey];
+}
+
+static void WCPSetAutoGrabRedPacketEnabled(BOOL enabled) {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setBool:enabled forKey:kWCPAutoGrabRedPacketKey];
+    [defaults synchronize];
+}
+
+static NSSet<NSString *> *WCPWhitelistUsernames(void) {
+    NSArray *arr = [[NSUserDefaults standardUserDefaults] arrayForKey:kWCPRedPacketWhitelistKey];
+    if (!arr) return [NSSet set];
+    NSMutableSet *set = [NSMutableSet set];
+    for (id obj in arr) {
+        if ([obj isKindOfClass:[NSString class]] && [(NSString *)obj length]) [set addObject:obj];
+    }
+    return [set copy];
+}
+
+static BOOL WCPIsUsernameWhitelisted(NSString *username) {
+    if (!username.length) return NO;
+    return [WCPWhitelistUsernames() containsObject:username];
+}
+
+static void WCPSetUsernameWhitelisted(NSString *username, BOOL whitelisted) {
+    if (!username.length) return;
+    NSMutableSet *set = [WCPWhitelistUsernames() mutableCopy];
+    if (whitelisted) [set addObject:username];
+    else [set removeObject:username];
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults setObject:[set allObjects] forKey:kWCPRedPacketWhitelistKey];
     [defaults synchronize];
 }
 
@@ -871,6 +970,361 @@ static UIButton *WCPMakeGlassCapsuleButton(NSString *title, BOOL tinted, BOOL bo
 
 
 // =========================================================================
+// 红包参数 / 队列 / 操作 / 任务管理 —— 移植自 DKWechatHelper 的
+// WeChatRedEnvelopParam / WBRedEnvelopParamQueue / WBReceiveRedEnvelopOperation /
+// WBRedEnvelopTaskManager（DKHelper.m:291–470），类名前加 WCP 前缀。
+// 两处与 DK 不同的地方：
+//   1. toParams 里所有值都兜底 @""——DK 原版用 NSDictionary 字面量，某个字段为
+//      nil 时会直接闪退；这里不会。
+//   2. 操作的 start/main 按标准并发 NSOperation 写法：start 里先置 executing=YES
+//      再调 main，main 结束时置 executing=NO、finished=YES。DK 原版在 start 里
+//      先调 main、再把 finished 置回 NO，靠队列已经把操作移出才没卡死；这里不
+//      依赖这种巧合。延迟固定为 0（立即开红包），Phase 6 不做延迟设置。
+//   3. 任务管理只保留并发队列（最多 5 个，与 DK 的 normal 队列一致）；DK 的串行
+//      队列对应“防止同时抢多个红包”开关，Phase 6 没有这个开关，先不引进来。
+// =========================================================================
+
+@interface WCPHBParam : NSObject
+@property (strong, nonatomic) NSString *msgType;
+@property (strong, nonatomic) NSString *sendId;
+@property (strong, nonatomic) NSString *channelId;
+@property (strong, nonatomic) NSString *nickName;
+@property (strong, nonatomic) NSString *headImg;
+@property (strong, nonatomic) NSString *nativeUrl;
+@property (strong, nonatomic) NSString *sessionUserName;
+@property (strong, nonatomic) NSString *sign;
+@property (strong, nonatomic) NSString *timingIdentifier;
+@property (assign, nonatomic) BOOL isGroupSender;
+- (NSDictionary *)toParams;
+@end
+
+@implementation WCPHBParam
+
+- (NSDictionary *)toParams {
+    return @{
+        @"msgType": self.msgType ?: @"",
+        @"sendId": self.sendId ?: @"",
+        @"channelId": self.channelId ?: @"",
+        @"nickName": self.nickName ?: @"",
+        @"headImg": self.headImg ?: @"",
+        @"nativeUrl": self.nativeUrl ?: @"",
+        @"sessionUserName": self.sessionUserName ?: @"",
+        @"timingIdentifier": self.timingIdentifier ?: @""
+    };
+}
+
+@end
+
+@interface WCPHBParamQueue : NSObject
++ (instancetype)sharedQueue;
+- (void)enqueue:(WCPHBParam *)param;
+- (WCPHBParam *)dequeue;
+@end
+
+@implementation WCPHBParamQueue {
+    NSMutableArray<WCPHBParam *> *_queue;
+}
+
++ (instancetype)sharedQueue {
+    static WCPHBParamQueue *queue = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ queue = [[WCPHBParamQueue alloc] init]; });
+    return queue;
+}
+
+- (instancetype)init {
+    if (self = [super init]) {
+        _queue = [NSMutableArray array];
+    }
+    return self;
+}
+
+- (void)enqueue:(WCPHBParam *)param {
+    if (!param) return;
+    @synchronized (self) {
+        [_queue addObject:param];
+    }
+}
+
+- (WCPHBParam *)dequeue {
+    @synchronized (self) {
+        if (_queue.count == 0) return nil;
+        WCPHBParam *first = _queue.firstObject;
+        [_queue removeObjectAtIndex:0];
+        return first;
+    }
+}
+
+@end
+
+@interface WCPHBReceiveOperation : NSOperation
+- (instancetype)initWithRedEnvelopParam:(WCPHBParam *)param delay:(unsigned int)delaySeconds;
+@end
+
+@implementation WCPHBReceiveOperation {
+    WCPHBParam *_redEnvelopParam;
+    unsigned int _delaySeconds;
+    BOOL _executing;
+    BOOL _finished;
+}
+
+- (instancetype)initWithRedEnvelopParam:(WCPHBParam *)param delay:(unsigned int)delaySeconds {
+    if (self = [super init]) {
+        _redEnvelopParam = param;
+        _delaySeconds = delaySeconds;
+    }
+    return self;
+}
+
+- (void)start {
+    if (self.isCancelled) {
+        [self willChangeValueForKey:@"isFinished"];
+        _finished = YES;
+        [self didChangeValueForKey:@"isFinished"];
+        return;
+    }
+    [self willChangeValueForKey:@"isExecuting"];
+    _executing = YES;
+    [self didChangeValueForKey:@"isExecuting"];
+    [self main];
+}
+
+- (void)main {
+    @try {
+        if (_delaySeconds > 0) [NSThread sleepForTimeInterval:_delaySeconds / 1000.0];
+        WCRedEnvelopesLogicMgr *logicMgr = [[%c(MMServiceCenter) defaultCenter] getService:%c(WCRedEnvelopesLogicMgr)];
+        [logicMgr OpenRedEnvelopesRequest:[_redEnvelopParam toParams]];
+    } @catch (NSException *e) {
+        // 开红包失败就静默跳过，不影响其他红包和消息流程。
+    }
+    [self willChangeValueForKey:@"isExecuting"];
+    _executing = NO;
+    [self didChangeValueForKey:@"isExecuting"];
+    [self willChangeValueForKey:@"isFinished"];
+    _finished = YES;
+    [self didChangeValueForKey:@"isFinished"];
+}
+
+- (void)cancel {
+    [self willChangeValueForKey:@"isExecuting"];
+    _executing = NO;
+    [self didChangeValueForKey:@"isExecuting"];
+    [self willChangeValueForKey:@"isFinished"];
+    _finished = YES;
+    [self didChangeValueForKey:@"isFinished"];
+}
+
+- (BOOL)isFinished { return _finished; }
+- (BOOL)isExecuting { return _executing; }
+- (BOOL)isAsynchronous { return YES; }
+
+@end
+
+@interface WCPHBTaskManager : NSObject
++ (instancetype)sharedManager;
+- (void)addNormalTask:(WCPHBReceiveOperation *)task;
+@end
+
+@implementation WCPHBTaskManager {
+    NSOperationQueue *_normalTaskQueue;
+}
+
++ (instancetype)sharedManager {
+    static WCPHBTaskManager *manager = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ manager = [[WCPHBTaskManager alloc] init]; });
+    return manager;
+}
+
+- (instancetype)init {
+    if (self = [super init]) {
+        _normalTaskQueue = [[NSOperationQueue alloc] init];
+        _normalTaskQueue.maxConcurrentOperationCount = 5;
+    }
+    return self;
+}
+
+- (void)addNormalTask:(WCPHBReceiveOperation *)task {
+    if (task) [_normalTaskQueue addOperation:task];
+}
+
+@end
+
+
+// =========================================================================
+// 红包解析辅助 —— 只用下标取值 + 类型检查，不用 NSDictionary 的
+// stringForKey:（那是微信私有分类的方法，本文件不声明它）。
+// =========================================================================
+
+// 字典里取字符串值：不是 NSString 或为空就返回 nil。
+static NSString *WCPHBStringFromDict(NSDictionary *dict, NSString *key) {
+    if (![dict isKindOfClass:[NSDictionary class]]) return nil;
+    id v = dict[key];
+    if ([v isKindOfClass:[NSString class]] && [(NSString *)v length]) return v;
+    return nil;
+}
+
+// 从查询请求的 reqText 里反推 sign（DK 的 parseRequestSign 原样）：
+// reqText 是 URL 编码的请求串，里面 nativeUrl 字段解码后是红包的 nativeUrl，
+// 再解一次拿 sign。拿不到就返回 nil（响应处理里会直接放弃，不开红包）。
+static NSString *WCPHBRequestSign(HongBaoReq *req) {
+    NSData *data = req.reqText.buffer;
+    if (!data.length) return nil;
+    NSString *reqStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (!reqStr.length) return nil;
+    NSDictionary *reqDict = [%c(WCBizUtil) dictionaryWithDecodedComponets:reqStr separator:@"&"];
+    NSString *nativeUrl = WCPHBStringFromDict(reqDict, @"nativeUrl");
+    if (!nativeUrl.length) return nil;
+    nativeUrl = [nativeUrl stringByRemovingPercentEncoding] ?: nativeUrl;
+    NSRange qRange = [nativeUrl rangeOfString:@"?"];
+    if (qRange.location != NSNotFound) {
+        nativeUrl = [nativeUrl substringFromIndex:qRange.location + qRange.length];
+    }
+    NSDictionary *urlDict = [%c(WCBizUtil) dictionaryWithDecodedComponets:nativeUrl separator:@"&"];
+    return WCPHBStringFromDict(urlDict, @"sign");
+}
+
+
+// =========================================================================
+// 白名单选择页 —— 纯 UIKit 的 UITableViewController 风格 VC，列出用户的全部
+// 会话（群聊在前、私聊在后），每行一个开关；开关状态即白名单内容，存 username。
+// 会话列表来自 MMNewSessionMgr GetUserNamesOnSessionList（MMNewSessionMgr.h:142，
+// 返回会话 username 数组，按微信会话顺序）；显示名用 CContactMgr
+// getContactByName: 取联系人再 getContactDisplayName；群聊按 username 含
+// "@chatroom" 区分。getContactByName 可能查库，所以在后台线程建列表，建好再
+// 回主线程刷表；任何一步失败都只显示空列表，不闪退。
+// =========================================================================
+
+static const char kWCPWhitelistUsernameKey = 0;
+
+@interface WCPWhitelistViewController : UIViewController <UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic, strong) UITableView *tableView;
+@property (nonatomic, strong) NSArray *groupSessions;   // 每项 @{@"username":..., @"displayName":...}
+@property (nonatomic, strong) NSArray *privateSessions;
+@property (nonatomic, assign) BOOL loaded;
+@end
+
+@implementation WCPWhitelistViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"选择群聊/私聊";
+    self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+
+    UITableView *tableView = [[UITableView alloc] initWithFrame:self.view.bounds
+                                                          style:UITableViewStyleInsetGrouped];
+    tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    tableView.dataSource = self;
+    tableView.delegate = self;
+    [self.view addSubview:tableView];
+    self.tableView = tableView;
+
+    self.groupSessions = @[];
+    self.privateSessions = @[];
+    self.loaded = NO;
+    [self loadSessions];
+}
+
+// 后台读会话列表，建好再回主线程刷表。
+- (void)loadSessions {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSArray *groups = @[];
+        NSArray *privates = @[];
+        @try {
+            MMNewSessionMgr *sessionMgr = [[%c(MMServiceCenter) defaultCenter] getService:%c(MMNewSessionMgr)];
+            CContactMgr *contactMgr = [[%c(MMServiceCenter) defaultCenter] getService:%c(CContactMgr)];
+            id userNames = [sessionMgr GetUserNamesOnSessionList];
+            if ([userNames isKindOfClass:[NSArray class]]) {
+                NSMutableArray *g = [NSMutableArray array];
+                NSMutableArray *p = [NSMutableArray array];
+                for (id name in (NSArray *)userNames) {
+                    if (![name isKindOfClass:[NSString class]] || ![(NSString *)name length]) continue;
+                    NSString *username = (NSString *)name;
+                    NSString *displayName = username;
+                    @try {
+                        CContact *contact = [contactMgr getContactByName:username];
+                        NSString *dn = [contact getContactDisplayName];
+                        if (dn.length) displayName = dn;
+                    } @catch (NSException *e) {
+                        // 联系人取不到显示名就用 username 本身，不影响选择。
+                    }
+                    NSDictionary *item = @{@"username": username, @"displayName": displayName};
+                    if ([username rangeOfString:@"@chatroom"].location != NSNotFound) {
+                        [g addObject:item];
+                    } else {
+                        [p addObject:item];
+                    }
+                }
+                groups = [g copy];
+                privates = [p copy];
+            }
+        } @catch (NSException *e) {
+            // 会话列表读不到就显示空列表，不闪退。
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.groupSessions = groups;
+            self.privateSessions = privates;
+            self.loaded = YES;
+            [self.tableView reloadData];
+        });
+    });
+}
+
+- (NSArray *)rowsForSection:(NSInteger)section {
+    return section == 0 ? self.groupSessions : self.privateSessions;
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    return 2;
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    return [self rowsForSection:section].count;
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    return section == 0 ? @"群聊" : @"私聊";
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    if (!self.loaded) return section == 1 ? @"正在加载会话列表…" : nil;
+    if (section != 1) return nil;
+    NSUInteger n = WCPWhitelistUsernames().count;
+    if (n == 0) return @"未选择任何会话，不会抢红包";
+    return [NSString stringWithFormat:@"已选 %lu 个会话，仅这些会话的红包会被自动抢", (unsigned long)n];
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    static NSString *reuseId = @"WCPWhitelistCell";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:reuseId];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:reuseId];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    }
+    NSDictionary *item = [self rowsForSection:indexPath.section][indexPath.row];
+    cell.textLabel.text = item[@"displayName"];
+    cell.textLabel.textColor = [UIColor labelColor];
+    cell.detailTextLabel.text = item[@"username"];
+    cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+    UISwitch *sw = [[UISwitch alloc] init];
+    sw.on = WCPIsUsernameWhitelisted(item[@"username"]);
+    objc_setAssociatedObject(sw, &kWCPWhitelistUsernameKey, item[@"username"], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [sw addTarget:self action:@selector(whitelistSwitchChanged:) forControlEvents:UIControlEventValueChanged];
+    cell.accessoryView = sw;
+    return cell;
+}
+
+- (void)whitelistSwitchChanged:(UISwitch *)sender {
+    NSString *username = objc_getAssociatedObject(sender, &kWCPWhitelistUsernameKey);
+    if (!username.length) return;
+    WCPSetUsernameWhitelisted(username, sender.isOn);
+    [self.tableView reloadData]; // 刷新 footer 的已选数量
+}
+
+@end
+
+
+// =========================================================================
 // 设置页 —— 纯 UIKit 的 UITableView，不依赖微信的 WCTableViewManager /
 // UiUtil / MMUIViewController，避免引入 DK 那些辅助类。
 //
@@ -936,6 +1390,13 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     // 以前这里用 insert/deleteSections，但 dataSource 映射错一个字符（见上面
     // WCPLogicalSectionForPhysical 的注释）就让一致性检查失败而闪退；动画不值得
     // 再闪退一次，改成 reloadData——整表按同一份快照重画，分区/行数不可能错位。
+    [self.tableView reloadData];
+}
+
+// 自动抢红包开关：只存状态，不立即生效——白名单说了算；
+// 刷一下表，刷新“选择群聊/私聊”的副标题和更多功能分区 footer。
+- (void)autoGrabSwitchChanged:(UISwitch *)sender {
+    WCPSetAutoGrabRedPacketEnabled(sender.isOn);
     [self.tableView reloadData];
 }
 
@@ -1036,7 +1497,7 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     if (logical == WCPSectionRevoke) return 1;
     if (logical == WCPSectionFormat) return WCPFormatExpanded() ? 7 : 1;
     // 格式分区展开时的 7 行：开关行 / 自定义格式（展示行，点按弹弹窗）/ 3 个预设 / 恢复默认 / 自定义颜色（展示行，点按弹弹窗）
-    if (logical == WCPSectionMore) return 6;
+    if (logical == WCPSectionMore) return 7; // 自动抢红包开关 / 选择群聊·私聊 / 5 个“即将推出”占位
     return 2;
 }
 
@@ -1059,6 +1520,13 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     if (logical == WCPSectionFormat) {
         if (!WCPFormatExpanded()) return nil;
         return @"占位符：{名字}＝撤回者（自己显示“你”）；{内容}＝原消息文本（非文本消息为空）；{时间}＝原消息时间。模板支持换行，提示里会保留换行。留空则使用默认格式。颜色只对拦截提示生效，改色后新拦截的提示即生效，已显示的滑出屏幕再滑回也会变色。";
+    }
+    if (logical == WCPSectionMore) {
+        // 开关开了但白名单还是空的，提醒用户先去选会话（否则什么都不抢）。
+        if (WCPAutoGrabRedPacketEnabled() && WCPWhitelistUsernames().count == 0) {
+            return @"自动抢红包已开启，但未选择任何会话，不会抢红包。请点“选择群聊/私聊”挑选要抢的会话。";
+        }
+        return nil;
     }
     return nil;
 }
@@ -1196,20 +1664,47 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
                forControlEvents:UIControlEventValueChanged];
         cell.accessoryView = revokeSwitch;
     } else if (logical == WCPSectionMore) {
-        // 占位行：后续阶段再实现
-        NSArray *comingSoon = @[@"自动抢红包",
-                                @"修改微信步数",
-                                @"小游戏作弊（剪刀石头布 / 骰子）",
-                                @"朋友圈转发",
-                                @"集赞助手",
-                                @"好友关系检测"];
-        cell.textLabel.text = comingSoon[indexPath.row];
-        cell.textLabel.textColor = [UIColor secondaryLabelColor];
-        cell.detailTextLabel.text = @"即将推出";
+        if (indexPath.row == 0) {
+            // 自动抢红包开关（默认关闭；开关本身不立即生效，白名单说了算）。
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            cell.textLabel.text = @"自动抢红包";
+            cell.textLabel.textColor = [UIColor labelColor];
+            cell.detailTextLabel.text = nil;
+            UISwitch *grabSwitch = [[UISwitch alloc] init];
+            grabSwitch.on = WCPAutoGrabRedPacketEnabled();
+            [grabSwitch addTarget:self
+                           action:@selector(autoGrabSwitchChanged:)
+                 forControlEvents:UIControlEventValueChanged];
+            cell.accessoryView = grabSwitch;
+            cell.accessoryType = UITableViewCellAccessoryNone;
+        } else if (indexPath.row == 1) {
+            // 选择群聊/私聊：点进去是白名单选择页；副标题显示已选数量。
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            cell.textLabel.text = @"选择群聊/私聊";
+            cell.textLabel.textColor = [UIColor labelColor];
+            NSUInteger n = WCPWhitelistUsernames().count;
+            cell.detailTextLabel.text = (n == 0) ? @"未选择" : [NSString stringWithFormat:@"已选 %lu 个", (unsigned long)n];
+            cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
+            cell.accessoryView = nil;
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        } else {
+            // 占位行：后续阶段再实现
+            NSArray *comingSoon = @[@"修改微信步数",
+                                    @"小游戏作弊（剪刀石头布 / 骰子）",
+                                    @"朋友圈转发",
+                                    @"集赞助手",
+                                    @"好友关系检测"];
+            cell.selectionStyle = UITableViewCellSelectionStyleNone;
+            cell.textLabel.text = comingSoon[indexPath.row - 2];
+            cell.textLabel.textColor = [UIColor secondaryLabelColor];
+            cell.detailTextLabel.text = @"即将推出";
+            cell.accessoryView = nil;
+            cell.accessoryType = UITableViewCellAccessoryNone;
+        }
     } else {
         if (indexPath.row == 0) {
             cell.textLabel.text = @"当前版本";
-            cell.detailTextLabel.text = @"HBG · Phase 5.1 · 适配微信 8.0.79";
+            cell.detailTextLabel.text = @"HBG · Phase 6 · 适配微信 8.0.79";
         } else {
             cell.textLabel.text = @"来源";
             cell.detailTextLabel.text = @"移植自 DKWechatHelper v1.1.0";
@@ -1222,6 +1717,15 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     NSInteger logical = WCPLogicalSectionForPhysical(indexPath.section);
+    if (logical == WCPSectionMore) {
+        [tableView deselectRowAtIndexPath:indexPath animated:YES];
+        if (indexPath.row == 1) {
+            // 白名单选择页随时都能进（开关没开也能先选好，开关开了才生效）。
+            WCPWhitelistViewController *vc = [[WCPWhitelistViewController alloc] init];
+            [self.navigationController pushViewController:vc animated:YES];
+        }
+        return;
+    }
     if (logical != WCPSectionFormat) return;
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (indexPath.row == 0) {
@@ -1433,6 +1937,134 @@ static const char kWCPJumpTapAttachedKey = 0;
         WCPNoticeMapSet([NSString stringWithFormat:@"%@|T%u", session, newWrap.m_uiCreateTime], origLocalID);
     }
     return;
+}
+
+// Phase 6 新增：自动抢红包检测 —— CMessageMgr onNewSyncAddMessage:。
+// 链路（DK 原样，见 phase6-NOTES.md §1）：type 49 且内容含 wxpay:// 的消息 →
+// 解析 m_oWCPayInfoItem.m_c2cNativeUrl → 查白名单 → ReceiverQueryRedEnvelopesRequest:
+// 查询 → 查询响应回来再开红包（见下面 %hook WCRedEnvelopesLogicMgr）。
+// 判断链（缺一不可，任一不满足就直接返回，什么都不做）：
+//   开关开着 → type 49 红包消息 → nativeUrl 能拿到 → 不是自己发的 →
+//   会话在白名单里 → nativeUrl 里有 sendId。
+// 安全：%orig 永远先调（消息本身正常显示）；整个方法包在 @try/@catch 里，
+// 解析或调用一出异常就静默跳过，绝不能影响消息流程。
+- (void)onNewSyncAddMessage:(CMessageWrap *)wrap {
+    %orig;
+    @try {
+        if (!WCPAutoGrabRedPacketEnabled()) return;
+        if (!wrap || wrap.m_uiMessageType != 49) return;
+        NSString *content = wrap.m_nsContent;
+        if (!content.length || [content rangeOfString:@"wxpay://"].location == NSNotFound) return;
+        NSString *nativeUrl = wrap.m_oWCPayInfoItem.m_c2cNativeUrl;
+        if (!nativeUrl.length) return;
+
+        CContactMgr *contactMgr = [[%c(MMServiceCenter) defaultCenter] getService:%c(CContactMgr)];
+        CContact *selfContact = [contactMgr getSelfContact];
+        if (!selfContact) return;
+        NSString *selfUserName = selfContact.m_nsUsrName;
+        // 自己发的红包不抢（自己发的群红包没有 sign，走另一条校验分支；Phase 6 不抢自己的）。
+        if (selfUserName.length && [wrap.m_nsFromUsr isEqualToString:selfUserName]) return;
+
+        // 会话＝消息来源方：群聊消息 m_nsFromUsr 是群 username，私聊是对方 username。
+        NSString *session = wrap.m_nsFromUsr;
+        if (!session.length) return;
+        if (!WCPIsUsernameWhitelisted(session)) return;
+
+        // 解析 nativeUrl：取 ? 后面的查询串，用 WCBizUtil 解码。
+        NSRange qRange = [nativeUrl rangeOfString:@"?"];
+        if (qRange.location == NSNotFound) return;
+        NSString *query = [nativeUrl substringFromIndex:qRange.location + qRange.length];
+        if (!query.length) return;
+        NSDictionary *urlDict = [%c(WCBizUtil) dictionaryWithDecodedComponets:query separator:@"&"];
+        if (![urlDict isKindOfClass:[NSDictionary class]]) return;
+        NSString *sendId = WCPHBStringFromDict(urlDict, @"sendid");
+        if (!sendId.length) return;
+
+        // 发查询请求（服务端返回走 OnWCToHongbaoCommonResponse:Request:）。
+        NSMutableDictionary *params = [NSMutableDictionary dictionary];
+        params[@"agreeDuty"] = @"0";
+        NSString *channelId = WCPHBStringFromDict(urlDict, @"channelid");
+        if (channelId) params[@"channelId"] = channelId;
+        params[@"inWay"] = @"0";
+        NSString *msgType = WCPHBStringFromDict(urlDict, @"msgtype");
+        if (msgType) params[@"msgType"] = msgType;
+        params[@"nativeUrl"] = nativeUrl;
+        params[@"sendId"] = sendId;
+        WCRedEnvelopesLogicMgr *logicMgr = [[%c(MMServiceCenter) defaultCenter] getService:%c(WCRedEnvelopesLogicMgr)];
+        if (!logicMgr) return;
+        [logicMgr ReceiverQueryRedEnvelopesRequest:params];
+
+        // 入队，等查询响应回来再开（响应处理见下面的 hook）。
+        WCPHBParam *hbParam = [[WCPHBParam alloc] init];
+        hbParam.msgType = msgType ?: @"";
+        hbParam.sendId = sendId;
+        hbParam.channelId = channelId ?: @"";
+        hbParam.nickName = [selfContact getContactDisplayName] ?: @"";
+        hbParam.headImg = selfContact.m_nsHeadImgUrl ?: @"";
+        hbParam.nativeUrl = nativeUrl;
+        hbParam.sessionUserName = session;
+        hbParam.sign = WCPHBStringFromDict(urlDict, @"sign") ?: @"";
+        hbParam.isGroupSender = NO; // 自己发的已在上面跳过，这里恒为 NO
+        [[WCPHBParamQueue sharedQueue] enqueue:hbParam];
+    } @catch (NSException *e) {
+        // 解析/调用异常就静默跳过，绝不能影响消息正常显示（%orig 已调过）。
+    }
+}
+
+%end
+
+
+// =========================================================================
+// Hook 5：抢红包查询响应 —— WCRedEnvelopesLogicMgr
+// OnWCToHongbaoCommonResponse:Request:。
+// 链路（DK 原样）：只有 cgiCmdid == 3（参数查询的响应）才处理；从队列里取出发
+// 查询时入队的参数；解析响应 JSON，校验 receiveStatus != 2（自己已抢过）、
+// hbStatus != 4（已抢完）、有 timingIdentifier（缺这个字段会被判外挂，直接
+// 放弃）、sign 对得上（请求原文里的 sign 和入队时的 sign 一致；自己发的群红包
+// 没有 sign，DK 那里跳过校验——Phase 6 不抢自己的，所以这里恒做校验）；
+// 都通过才把 timingIdentifier 填进参数，起一个开红包操作（延迟 0，立即开）
+// 放进任务队列（并发最多 5 个）。
+// 安全：%orig 永远先调；队列为空（不是我们发起的查询，比如用户手动抢红包）
+// 就直接返回；整个方法包在 @try/@catch 里，异常静默跳过。
+// =========================================================================
+
+%hook WCRedEnvelopesLogicMgr
+
+- (void)OnWCToHongbaoCommonResponse:(HongBaoRes *)arg1 Request:(HongBaoReq *)arg2 {
+    %orig;
+    @try {
+        if (!WCPAutoGrabRedPacketEnabled()) return;
+        if (!arg1 || arg1.cgiCmdid != 3) return;
+        WCPHBParam *hbParam = [[WCPHBParamQueue sharedQueue] dequeue];
+        if (!hbParam) return; // 不是我们发起的查询（比如手动抢红包），不处理
+
+        NSData *respData = arg1.retText.buffer;
+        if (!respData.length) return;
+        id respObj = [NSJSONSerialization JSONObjectWithData:respData options:0 error:nil];
+        if (![respObj isKindOfClass:[NSDictionary class]]) return;
+        NSDictionary *resp = respObj;
+        // 自己已经抢过
+        if ([resp[@"receiveStatus"] integerValue] == 2) return;
+        // 红包被抢完
+        if ([resp[@"hbStatus"] integerValue] == 4) return;
+        // 没有这个字段会被判定为使用外挂
+        NSString *timingId = resp[@"timingIdentifier"];
+        if (![timingId isKindOfClass:[NSString class]] || !timingId.length) return;
+
+        // sign 校验：请求原文里的 sign 必须和入队时的 sign 一致。
+        // 自己发的群红包没有 sign，DK 那里跳过校验；Phase 6 不抢自己的，
+        // 所以 isGroupSender 恒为 NO，这里恒做校验。
+        if (!hbParam.isGroupSender) {
+            NSString *reqSign = WCPHBRequestSign(arg2);
+            if (!reqSign.length || ![reqSign isEqualToString:hbParam.sign]) return;
+        }
+
+        hbParam.timingIdentifier = timingId;
+        WCPHBReceiveOperation *op = [[WCPHBReceiveOperation alloc] initWithRedEnvelopParam:hbParam delay:0];
+        [[WCPHBTaskManager sharedManager] addNormalTask:op];
+    } @catch (NSException *e) {
+        // 解析/调用异常就静默跳过，不影响其他红包和消息流程。
+    }
 }
 
 %end
