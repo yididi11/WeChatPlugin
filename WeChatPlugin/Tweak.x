@@ -1,4 +1,17 @@
-// WeChatPlugin — Phase 3：设置页重排 + 提示颜色（适配微信 8.0.79）
+// WeChatPlugin — Phase 3.1：修设置页闪退和重叠（适配微信 8.0.79）
+//
+// 在 Phase 3 的基础上只修三处（详见 phase3.1-NOTES.md）：
+//   1. 逻辑/物理分区换算错一个字符：WCPLogicalSectionForPhysical 里
+//      `physical > WCPSectionFormat` 应为 `>=`。格式分区不存在时物理 1 是
+//      “更多功能”，错认成格式分区导致开关拨动时 insert/deleteSections 的
+//      一致性检查失败（NSInternalInconsistencyException）而闪退，关掉状态
+//      下的布局也全乱。
+//   2. titleForHeaderInSection 给格式分区漏返回 nil，逻辑 1 掉到最后的
+//      return @"关于"，格式分区上方凭空多一个“关于”标题（用户截图里就是它）。
+//   3. 稳健优先：开关拨动和收起/展开都不再用 insert/deleteSections/Rows，
+//      一律 reloadData——整表按同一份快照重画，不可能再因行数错位闪退或重叠。
+// Phase 3 的全部功能原样保留：点提示跳转、格式模板+预设、换行、颜色、
+// 开关关时隐藏格式分区、收起/展开。
 //
 // 在 Phase 2（点提示跳转 + 格式自定义）的基础上：
 //   1. 修重叠 bug：Phase 2 每次点预设都 reloadSections 整个格式分区，
@@ -484,9 +497,9 @@ static void WCPApplyNoticeColorToCell(SystemMessageCellView *cellView) {
 // UiUtil / MMUIViewController，避免引入 DK 那些辅助类。
 //
 // 分区（逻辑编号）：0 消息防撤回 / 1 拦截提示格式 / 2 更多功能 / 3 关于。
-// 防撤回关闭时格式分区直接不显示（物理分区数 4→3，开关拨动时
-// insert/delete 分区）；格式分区内部：首行是收起/展开开关行，展开时
-// 才有编辑框、预设、恢复默认、颜色；收起状态存 NSUserDefaults。
+// 防撤回关闭时格式分区直接不显示（物理分区数 4→3，开关拨动时 reloadData
+// 整表重画）；格式分区内部：首行是收起/展开开关行，展开时才有编辑框、预设、
+// 恢复默认、颜色；收起状态存 NSUserDefaults。
 // 点预设/恢复默认时不再整区 reload，只直接改可见 cell 的勾选状态，
 // 避免 Phase 2 的重影问题。
 // =========================================================================
@@ -508,7 +521,13 @@ static NSInteger WCPPhysicalSectionForLogical(NSInteger logical) {
 }
 
 static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
-    if (!WCPHasFormatSection() && physical > WCPSectionFormat) return physical + 1;
+    // Phase 3.1 修复：这里必须是 >=，不是 >。
+    // 格式分区不存在时物理分区只有 3 个：0＝防撤回，1＝更多功能，2＝关于。
+    // 物理 1 其实是“更多功能”（逻辑 2），用 > 会把它错认成格式分区（逻辑 1），
+    // 导致关掉开关的状态下 dataSource 给“更多功能”返回格式分区的行数/标题/footer/
+    // cell，insert/deleteSections 的一致性检查失败（NSInternalInconsistencyException）
+    // 直接闪退，布局也全乱（见 phase3.1-NOTES.md §1）。
+    if (!WCPHasFormatSection() && physical >= WCPSectionFormat) return physical + 1;
     return physical;
 }
 
@@ -545,14 +564,13 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     BOOL wasOn = WCPPreventRevokeEnabled();
     WCPSetPreventRevokeEnabled(on);
     if (on == wasOn) return;
-    // 防撤回关闭时格式分区直接消失，打开时再出现（不再是变灰）。
-    if (on) {
-        [self.tableView insertSections:[NSIndexSet indexSetWithIndex:1]
-                      withRowAnimation:UITableViewRowAnimationFade];
-    } else {
-        [self.tableView deleteSections:[NSIndexSet indexSetWithIndex:1]
-                      withRowAnimation:UITableViewRowAnimationFade];
-    }
+    // Phase 3.1：防撤回关闭时格式分区直接消失，打开时再出现（不再是变灰）。
+    // 以前这里用 insert/deleteSections，但 dataSource 映射错一个字符（见上面
+    // WCPLogicalSectionForPhysical 的注释）就让一致性检查失败而闪退；动画不值得
+    // 再闪退一次，改成 reloadData——整表按同一份快照重画，分区/行数不可能错位。
+    // 先收键盘：用户可能正在编辑模板，编辑框要被移走时先让它保存并 resign。
+    [self.formatTextView resignFirstResponder];
+    [self.tableView reloadData];
 }
 
 #pragma mark - 格式设置
@@ -597,21 +615,12 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     [self.formatTextView resignFirstResponder];
     BOOL expanded = !WCPFormatExpanded();
     WCPSetFormatExpanded(expanded);
-    NSInteger section = WCPPhysicalSectionForLogical(WCPSectionFormat);
-    NSMutableArray<NSIndexPath *> *paths = [NSMutableArray array];
-    for (NSInteger row = 1; row <= 6; row++) {
-        [paths addObject:[NSIndexPath indexPathForRow:row inSection:section]];
-    }
-    [self.tableView beginUpdates];
-    if (expanded) {
-        [self.tableView insertRowsAtIndexPaths:paths withRowAnimation:UITableViewRowAnimationFade];
-    } else {
-        [self.tableView deleteRowsAtIndexPaths:paths withRowAnimation:UITableViewRowAnimationFade];
-    }
-    // 首行开关行的“收起/展开”字样也要变，只刷这一行。
-    [self.tableView reloadRowsAtIndexPaths:@[[NSIndexPath indexPathForRow:0 inSection:section]]
-                          withRowAnimation:UITableViewRowAnimationNone];
-    [self.tableView endUpdates];
+    // Phase 3.1：以前这里用 beginUpdates + insert/deleteRows（1..6 行）再 reloadRows
+    // 首行，行数本身是对得上的（展开 7 行、收起 1 行），但把删除/插入/重载三种操作
+    // 混在同一个 update 里本身就是闪退高危区（Phase 3 的教训）；改成 reloadData，
+    // 整表按同一份快照重画，收起/展开不可能再和别的行重叠。首行“收起 ▴ / 展开 ▾”
+    // 的字样由 cellForRow 按新状态重画，不用单独刷。
+    [self.tableView reloadData];
 }
 
 #pragma mark - 颜色选择
@@ -713,6 +722,9 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     NSInteger logical = WCPLogicalSectionForPhysical(section);
     if (logical == WCPSectionRevoke) return @"消息防撤回";
     // 格式分区没有独立标题：首行开关行就是标题行，避免“拦截提示格式”出现两次。
+    // Phase 3.1 修复：以前这里没给格式分区单独返回 nil，逻辑 1 会掉到最后的
+    // return @"关于"，导致格式分区上方凭空多一个“关于”标题（用户截图里就是它）。
+    if (logical == WCPSectionFormat) return nil;
     if (logical == WCPSectionMore) return @"更多功能";
     return @"关于";
 }
@@ -880,7 +892,7 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     } else {
         if (indexPath.row == 0) {
             cell.textLabel.text = @"当前版本";
-            cell.detailTextLabel.text = @"HBG · Phase 3 · 适配微信 8.0.79";
+            cell.detailTextLabel.text = @"HBG · Phase 3.1 · 适配微信 8.0.79";
         } else {
             cell.textLabel.text = @"来源";
             cell.detailTextLabel.text = @"移植自 DKWechatHelper v1.1.0";
