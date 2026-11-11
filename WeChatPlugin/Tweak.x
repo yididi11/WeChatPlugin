@@ -1,47 +1,23 @@
-// WeChatPlugin — Phase 3.1：修设置页闪退和重叠（适配微信 8.0.79）
+// WeChatPlugin — Phase 4：拦截提示颜色改用十六进制代码输入（适配微信 8.0.79）
 //
-// 在 Phase 3 的基础上只修三处（详见 phase3.1-NOTES.md）：
-//   1. 逻辑/物理分区换算错一个字符：WCPLogicalSectionForPhysical 里
-//      `physical > WCPSectionFormat` 应为 `>=`。格式分区不存在时物理 1 是
-//      “更多功能”，错认成格式分区导致开关拨动时 insert/deleteSections 的
-//      一致性检查失败（NSInternalInconsistencyException）而闪退，关掉状态
-//      下的布局也全乱。
-//   2. titleForHeaderInSection 给格式分区漏返回 nil，逻辑 1 掉到最后的
-//      return @"关于"，格式分区上方凭空多一个“关于”标题（用户截图里就是它）。
-//   3. 稳健优先：开关拨动和收起/展开都不再用 insert/deleteSections/Rows，
-//      一律 reloadData——整表按同一份快照重画，不可能再因行数错位闪退或重叠。
-// Phase 3 的全部功能原样保留：点提示跳转、格式模板+预设、换行、颜色、
-// 开关关时隐藏格式分区、收起/展开。
+// 在 Phase 3.1 的基础上只做一件事：
+//   1. 删掉 Phase 3 加的那排 6 个预设色点（默认灰/红/橙/绿/蓝/紫全部取消，
+//      相关 UI 和代码全部删除，不留任何色点）；颜色只通过“自定义颜色”一行的
+//      十六进制输入框来改。格式分区展开时仍是 7 行，第 6 行就是这行输入框。
+//   2. 输入框解析：去首尾空格和可选的 '#'；接受 6 位 RRGGBB（如 FFBAC6）、
+//      3 位 RGB 简写（如 FBC → FFBBCC）、8 位 AARRGGBB（前两位透明度，取后
+//      6 位作颜色）；大小写不敏感。其他长度或含非十六进制字符一律非法，
+//      不保存、不应用、不闪退，输入框恢复成已存值并在行内小字里提示格式。
+//      注意：用户举例的 FFFBAC6 是 7 位，属于非法输入，会被拒绝并提示。
+//   3. 合法值统一存已有 key "revokeNoticeColor"（#RRGGBB 格式），不用新 key；
+//      现有的上色逻辑（TextStyle oTextColor/oDrawColor + RichTextView
+//      oTextColor）不用动；版本号升到 HBG · Phase 4。
 //
-// 在 Phase 2（点提示跳转 + 格式自定义）的基础上：
-//   1. 修重叠 bug：Phase 2 每次点预设都 reloadSections 整个格式分区，
-//      勾选状态变化的两行 Value1 样式 cell 的 detailTextLabel 会错位重影
-//      约 0.3 秒（录屏逐帧确认：只影响勾选变化的行，输入框行本身是干净的）。
-//      修法：预设行改用上下两行的 Subtitle 样式（模板独占一行，不再和勾选同行），
-//      点预设/恢复默认时不再整区 reload，只直接改可见 cell 的勾选状态。
-//   2. 排版改松：预设模板多行完整显示不再截断；编辑区 120pt 高；各行留白加大。
-//   3. 模板支持换行：单行 UITextField 换成多行 UITextView（自带“完成”按钮收键盘），
-//      模板里的 \n 在生成提示时保留（系统消息走 RichTextView 渲染，\n 是否断行
-//      需真机验证，见 phase3-NOTES.md）。
-//   4. 防撤回关闭时格式分区直接不显示（分区数随开关动态变化，开关拨动时
-//      insert/delete 分区），不再是变灰。
-//   5. 收起/展开：格式分区首行是“拦截提示格式 收起 ▴ / 展开 ▾”开关行，
-//      收起时只留这一行；状态存 NSUserDefaults（key "revokeFormatExpanded"，
-//      默认展开）。
-//   6. 自定义提示颜色：设置页一排 6 个色点（默认灰/红/橙/绿/蓝/紫），
-//      存 NSUserDefaults（key "revokeNoticeColor"，空＝默认灰）；
-//      插提示时不改 wrap（系统消息没有可用的颜色字段，m_attachedTextColor 是
-//      表情消息的附加文字颜色，不是给系统消息用的），而是在
-//      SystemMessageCellView 布局时改 viewModel.contentTextStyles 里各
-//      TextStyle 的 oTextColor/oDrawColor + RichTextView.oTextColor
-//      （均在 8.0.79 头文件里有声明；是否生效需真机验证，不生效时提示
-//      保持默认灰色，不影响任何功能）。
-//   7. 关于行版本号 Phase 2 → Phase 3。另核查：所谓错字“移值自 DKWechathelper
-//      v1.0”在现有代码里不存在，phase2-Tweak.x:496、starter 包和用户录屏里
-//      都是“移植自 DKWechatHelper v1.1.0”，无需改动。
+// Phase 3.1 的修复原样保留：逻辑/物理分区换算用 >=、格式分区标题显式返回 nil、
+// 开关拨动和收起/展开一律 reloadData（绝不用 insert/deleteSections/Rows）。
 //
 // 保持不变：静默加载（无 %ctor 弹窗）、汉伯格/HBG 命名、所有功能默认关闭、
-// 点提示跳转、3 个格式预设、不直接写 [WeChatClass class]（微信类一律
+// 点提示跳转、格式模板+预设+换行、不直接写 [WeChatClass class]（微信类一律
 // objc_getClass / %c 运行时查，否则链接失败）、不用 keyWindow / MSHookIvar /
 // CaptainHook / QGVAPlayer。
 // 不包含（后续阶段再做）：自动抢红包、步数、小游戏、朋友圈转发、集赞、好友检测、
@@ -256,27 +232,42 @@ static void WCPSetFormatExpanded(BOOL expanded) {
 
 
 // =========================================================================
-// 拦截提示颜色 —— NSUserDefaults（新 key "revokeNoticeColor"，存 #RRGGBB；
+// 拦截提示颜色 —— NSUserDefaults（key "revokeNoticeColor"，存 #RRGGBB；
 // 未设置/空字符串＝默认灰，不做任何改色）。
-// 6 个选项：默认（系统灰，仅作色点显示，不存颜色）、红、橙、绿、蓝、紫。
+// Phase 4：颜色只通过“自定义颜色”行的十六进制输入框改；Phase 3 的 6 个
+// 预设色点已按用户要求取消，相关代码全部删除（不再有色点 UI 和同步逻辑）。
 // =========================================================================
 
 static NSString * const kWCPRevokeNoticeColorKey = @"revokeNoticeColor";
 
-static NSArray<NSDictionary *> *WCPNoticeColorChoices(void) {
-    static NSArray<NSDictionary *> *choices = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        choices = @[
-            @{@"name": @"默认", @"hex": @""},
-            @{@"name": @"红色", @"hex": @"#FF3B30"},
-            @{@"name": @"橙色", @"hex": @"#FF9500"},
-            @{@"name": @"绿色", @"hex": @"#34C759"},
-            @{@"name": @"蓝色", @"hex": @"#007AFF"},
-            @{@"name": @"紫色", @"hex": @"#AF52DE"},
-        ];
-    });
-    return choices;
+// 把用户输入归一化成 #RRGGBB（大写）；非法返回 nil。
+// 规则：去首尾空格和可选的 '#'；接受 6 位 RRGGBB、3 位 RGB 简写（每位翻倍，
+// 如 FBC → FFBBCC）、8 位 AARRGGBB（前两位是透明度，取后 6 位作颜色）；
+// 大小写不敏感；其他长度或含非十六进制字符一律非法。
+// 注意：FFFBAC6 是 7 位，属于非法输入。
+static NSString *WCPNormalizeHexColor(NSString *input) {
+    if (!input) return nil;
+    NSString *clean = [input stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if ([clean hasPrefix:@"#"]) clean = [clean substringFromIndex:1];
+    if (clean.length == 3) {
+        // 3 位简写：每位翻倍。
+        NSMutableString *expanded = [NSMutableString stringWithCapacity:6];
+        for (NSUInteger i = 0; i < 3; i++) {
+            unichar c = [clean characterAtIndex:i];
+            [expanded appendFormat:@"%C%C", c, c];
+        }
+        clean = expanded;
+    } else if (clean.length == 8) {
+        // 8 位 AARRGGBB：前两位透明度，取后 6 位。
+        clean = [clean substringFromIndex:2];
+    } else if (clean.length != 6) {
+        return nil;
+    }
+    // 必须是 6 位十六进制字符（NSScanner 的 scanHexInt 会在首个非法字符处停下，
+    // 只看返回值不够严，必须先逐字符校验）。
+    NSCharacterSet *hexChars = [NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdefABCDEF"];
+    if ([[clean stringByTrimmingCharactersInSet:hexChars] length] != 0) return nil;
+    return [NSString stringWithFormat:@"#%@", [clean uppercaseString]];
 }
 
 // 返回当前选中的颜色 hex；nil/空＝默认灰（不改色）。
@@ -294,23 +285,15 @@ static void WCPSetRevokeNoticeColorHex(NSString *hex) {
 }
 
 static UIColor *WCPUIColorFromHex(NSString *hex) {
-    if (!hex.length) return nil;
-    NSString *clean = [hex stringByReplacingOccurrencesOfString:@"#" withString:@""];
-    if (clean.length != 6) return nil;
+    NSString *normalized = WCPNormalizeHexColor(hex);
+    if (!normalized) return nil;
     unsigned int rgb = 0;
-    NSScanner *scanner = [NSScanner scannerWithString:clean];
+    NSScanner *scanner = [NSScanner scannerWithString:[normalized substringFromIndex:1]];
     if (![scanner scanHexInt:&rgb]) return nil;
     return [UIColor colorWithRed:((rgb >> 16) & 0xFF) / 255.0
                            green:((rgb >> 8) & 0xFF) / 255.0
                             blue:(rgb & 0xFF) / 255.0
                            alpha:1.0];
-}
-
-// 色点按钮的显示颜色（“默认”那颗显示系统灰）。
-static UIColor *WCPColorForChoice(NSDictionary *choice) {
-    NSString *hex = choice[@"hex"];
-    if (!hex.length) return [UIColor systemGrayColor];
-    return WCPUIColorFromHex(hex) ?: [UIColor systemGrayColor];
 }
 
 
@@ -499,7 +482,7 @@ static void WCPApplyNoticeColorToCell(SystemMessageCellView *cellView) {
 // 分区（逻辑编号）：0 消息防撤回 / 1 拦截提示格式 / 2 更多功能 / 3 关于。
 // 防撤回关闭时格式分区直接不显示（物理分区数 4→3，开关拨动时 reloadData
 // 整表重画）；格式分区内部：首行是收起/展开开关行，展开时才有编辑框、预设、
-// 恢复默认、颜色；收起状态存 NSUserDefaults。
+// 恢复默认、自定义颜色（十六进制输入）；收起状态存 NSUserDefaults。
 // 点预设/恢复默认时不再整区 reload，只直接改可见 cell 的勾选状态，
 // 避免 Phase 2 的重影问题。
 // =========================================================================
@@ -531,10 +514,12 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     return physical;
 }
 
-@interface WCPSettingsViewController : UIViewController <UITableViewDataSource, UITableViewDelegate, UITextViewDelegate>
+@interface WCPSettingsViewController : UIViewController <UITableViewDataSource, UITableViewDelegate, UITextViewDelegate, UITextFieldDelegate>
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) UITextView *formatTextView;
 @property (nonatomic, strong) UILabel *formatPlaceholderLabel;
+@property (nonatomic, strong) UITextField *colorHexField;
+@property (nonatomic, strong) UILabel *colorHexHintLabel;
 @end
 
 @implementation WCPSettingsViewController
@@ -568,8 +553,9 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     // 以前这里用 insert/deleteSections，但 dataSource 映射错一个字符（见上面
     // WCPLogicalSectionForPhysical 的注释）就让一致性检查失败而闪退；动画不值得
     // 再闪退一次，改成 reloadData——整表按同一份快照重画，分区/行数不可能错位。
-    // 先收键盘：用户可能正在编辑模板，编辑框要被移走时先让它保存并 resign。
+    // 先收键盘：用户可能正在编辑模板或颜色代码，编辑框要被移走时先让它保存并 resign。
     [self.formatTextView resignFirstResponder];
+    [self.colorHexField resignFirstResponder];
     [self.tableView reloadData];
 }
 
@@ -600,6 +586,7 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     self.formatTextView.text = tpl;
     self.formatPlaceholderLabel.hidden = tpl.length > 0;
     [self.formatTextView resignFirstResponder];
+    [self.colorHexField resignFirstResponder];
     [self updateFormatCheckmarks];
 }
 
@@ -608,11 +595,13 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     self.formatTextView.text = @"";
     self.formatPlaceholderLabel.hidden = NO;
     [self.formatTextView resignFirstResponder];
+    [self.colorHexField resignFirstResponder];
     [self updateFormatCheckmarks];
 }
 
 - (void)toggleFormatExpanded {
     [self.formatTextView resignFirstResponder];
+    [self.colorHexField resignFirstResponder];
     BOOL expanded = !WCPFormatExpanded();
     WCPSetFormatExpanded(expanded);
     // Phase 3.1：以前这里用 beginUpdates + insert/deleteRows（1..6 行）再 reloadRows
@@ -623,34 +612,81 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     [self.tableView reloadData];
 }
 
-#pragma mark - 颜色选择
+#pragma mark - 自定义颜色（十六进制输入）
 
-- (void)updateColorSwatchesForCell:(UITableViewCell *)cell {
-    if (!cell) return;
-    NSString *currentHex = WCPRevokeNoticeColorHex() ?: @"";
-    NSArray *choices = WCPNoticeColorChoices();
-    for (NSInteger i = 0; i < (NSInteger)choices.count; i++) {
-        UIButton *btn = (UIButton *)[cell.contentView viewWithTag:100 + i];
-        if (!btn) continue;
-        BOOL selected = [choices[i][@"hex"] isEqualToString:currentHex];
-        [btn setTitle:selected ? @"✓" : @"" forState:UIControlStateNormal];
-        btn.layer.borderWidth = selected ? 2.0 : 0.0;
-        btn.layer.borderColor = [UIColor whiteColor].CGColor;
+// 输入框和提示小字只建一次（复用时移进 cell，与多行模板输入框同一个做法）。
+// 键盘用默认键盘；回车是“完成”，收键盘靠回车或点别处；结束编辑时提交。
+- (void)ensureColorHexField {
+    if (self.colorHexField) return;
+    UITextField *field = [[UITextField alloc] init];
+    field.font = [UIFont systemFontOfSize:16];
+    field.textColor = [UIColor labelColor];
+    field.backgroundColor = [UIColor clearColor];
+    field.placeholder = @"例如 FFBAC6";
+    field.textAlignment = NSTextAlignmentRight;
+    field.autocapitalizationType = UITextAutocapitalizationTypeAllCharacters;
+    field.autocorrectionType = UITextAutocorrectionTypeNo;
+    field.spellCheckingType = UITextSpellCheckingTypeNo;
+    field.returnKeyType = UIReturnKeyDone;
+    field.clearButtonMode = UITextFieldViewModeWhileEditing;
+    field.delegate = self;
+
+    UILabel *hint = [[UILabel alloc] init];
+    hint.text = @"请输入 6 位十六进制颜色代码，例如 FFBAC6，留空恢复默认灰色";
+    hint.font = [UIFont systemFontOfSize:12];
+    hint.textColor = [UIColor secondaryLabelColor];
+    self.colorHexHintLabel = hint;
+    self.colorHexField = field;
+}
+
+// 正常状态的提示小字（非法输入后会被改成红色报错，合法提交后恢复）。
+- (void)resetColorHexHint {
+    self.colorHexHintLabel.text = @"请输入 6 位十六进制颜色代码，例如 FFBAC6，留空恢复默认灰色";
+    self.colorHexHintLabel.textColor = [UIColor secondaryLabelColor];
+}
+
+// 提交输入框内容：回车确认或结束编辑时调。
+// 留空 → 清除自定义颜色，恢复默认灰；合法 → 归一化成 #RRGGBB 存进已有 key，
+// 输入框同步显示归一化后的值；非法（7 位如 FFFBAC6、含非十六进制字符等）→
+// 不保存、不应用，输入框恢复成当前已存的颜色值，提示小字变红说明格式。
+- (void)commitColorHexField {
+    if (!self.colorHexField) return;
+    NSString *trimmed = [self.colorHexField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!trimmed.length) {
+        // 留空＝清除自定义颜色，恢复默认灰（WCPSetRevokeNoticeColorHex(nil) 会删 key）。
+        WCPSetRevokeNoticeColorHex(nil);
+        self.colorHexField.text = @"";
+        [self resetColorHexHint];
+        return;
     }
+    NSString *normalized = WCPNormalizeHexColor(self.colorHexField.text);
+    if (!normalized) {
+        // 非法：恢复成已存值，不改任何存储。
+        self.colorHexField.text = WCPRevokeNoticeColorHex() ?: @"";
+        self.colorHexHintLabel.text = @"格式不正确，请输入 6 位十六进制颜色代码，例如 FFBAC6";
+        self.colorHexHintLabel.textColor = [UIColor systemRedColor];
+        return;
+    }
+    WCPSetRevokeNoticeColorHex(normalized);
+    self.colorHexField.text = normalized;
+    [self resetColorHexHint];
 }
 
-- (void)updateColorSwatches {
-    NSInteger section = WCPPhysicalSectionForLogical(WCPSectionFormat);
-    UITableViewCell *cell = [self.tableView cellForRowAtIndexPath:[NSIndexPath indexPathForRow:6 inSection:section]];
-    [self updateColorSwatchesForCell:cell];
+#pragma mark - UITextFieldDelegate
+
+- (BOOL)textFieldShouldReturn:(UITextField *)textField {
+    if (textField == self.colorHexField) {
+        [self commitColorHexField];
+        [textField resignFirstResponder];
+        return NO;
+    }
+    return YES;
 }
 
-- (void)colorSwatchTapped:(UIButton *)sender {
-    NSArray *choices = WCPNoticeColorChoices();
-    NSInteger index = sender.tag - 100;
-    if (index < 0 || index >= (NSInteger)choices.count) return;
-    WCPSetRevokeNoticeColorHex(choices[index][@"hex"]);
-    [self updateColorSwatches];
+- (void)textFieldDidEndEditing:(UITextField *)textField {
+    if (textField == self.colorHexField) {
+        [self commitColorHexField];
+    }
 }
 
 #pragma mark - 编辑框
@@ -713,7 +749,7 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     NSInteger logical = WCPLogicalSectionForPhysical(section);
     if (logical == WCPSectionRevoke) return 1;
     if (logical == WCPSectionFormat) return WCPFormatExpanded() ? 7 : 1;
-    // 格式分区展开时的 7 行：开关行 / 编辑框 / 3 个预设 / 恢复默认 / 颜色
+    // 格式分区展开时的 7 行：开关行 / 编辑框 / 3 个预设 / 恢复默认 / 自定义颜色（十六进制输入）
     if (logical == WCPSectionMore) return 6;
     return 2;
 }
@@ -746,7 +782,7 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     if (logical == WCPSectionFormat) {
         if (indexPath.row == 1) return 120; // 多行编辑框
         if (indexPath.row >= 2 && indexPath.row <= 4) return 66; // 预设：标题 + 两行模板
-        if (indexPath.row == 6) return 64; // 颜色：一行标题 + 一排色点
+        if (indexPath.row == 6) return 64; // 自定义颜色：标题 + 输入框 + 格式提示小字
     }
     return 44;
 }
@@ -829,32 +865,36 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
             cell.accessoryType = (WCPRevokeNoticeFormat() == nil) ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
             return cell;
         }
-        // row 6：提示颜色（一行标题 + 一排色点，点一下即切换）
+        // row 6：自定义颜色（十六进制输入框 + 格式提示小字）。
+        // 输入框和提示小字只建一次，复用时移进 cell（与多行模板输入框同一个做法）；
+        // 标题是静态文字，随 cell 创建。点这行（非输入框区域）时聚焦输入框。
         static NSString *colorReuseId = @"WCPFormatColorCell";
         UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:colorReuseId];
         if (!cell) {
             cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:colorReuseId];
-            cell.selectionStyle = UITableViewCellSelectionStyleNone;
-            UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 8, 200, 20)];
-            titleLabel.text = @"提示颜色";
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(16, 8, 90, 30)];
+            titleLabel.text = @"自定义颜色";
             titleLabel.font = [UIFont systemFontOfSize:16];
             titleLabel.textColor = [UIColor labelColor];
             [cell.contentView addSubview:titleLabel];
-            NSArray *choices = WCPNoticeColorChoices();
-            for (NSInteger i = 0; i < (NSInteger)choices.count; i++) {
-                UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
-                btn.tag = 100 + i;
-                btn.frame = CGRectMake(16 + i * 46, 30, 34, 34);
-                btn.layer.cornerRadius = 17;
-                btn.layer.masksToBounds = YES;
-                btn.backgroundColor = WCPColorForChoice(choices[i]);
-                btn.titleLabel.font = [UIFont boldSystemFontOfSize:16];
-                [btn setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-                [btn addTarget:self action:@selector(colorSwatchTapped:) forControlEvents:UIControlEventTouchUpInside];
-                [cell.contentView addSubview:btn];
-            }
         }
-        [self updateColorSwatchesForCell:cell];
+        [self ensureColorHexField];
+        // 不在编辑时才同步输入框内容：正在输入时别把用户正在打的字覆盖掉。
+        if (!self.colorHexField.isFirstResponder) {
+            NSString *storedHex = WCPRevokeNoticeColorHex() ?: @"";
+            if (![self.colorHexField.text isEqualToString:storedHex]) {
+                self.colorHexField.text = storedHex;
+            }
+            [self resetColorHexHint];
+        }
+        CGFloat w = cell.contentView.bounds.size.width;
+        [self.colorHexField removeFromSuperview];
+        self.colorHexField.frame = CGRectMake(110, 8, w - 126, 30);
+        [cell.contentView addSubview:self.colorHexField];
+        [self.colorHexHintLabel removeFromSuperview];
+        self.colorHexHintLabel.frame = CGRectMake(16, 40, w - 32, 16);
+        [cell.contentView addSubview:self.colorHexHintLabel];
         return cell;
     }
 
@@ -892,7 +932,7 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     } else {
         if (indexPath.row == 0) {
             cell.textLabel.text = @"当前版本";
-            cell.detailTextLabel.text = @"HBG · Phase 3.1 · 适配微信 8.0.79";
+            cell.detailTextLabel.text = @"HBG · Phase 4 · 适配微信 8.0.79";
         } else {
             cell.textLabel.text = @"来源";
             cell.detailTextLabel.text = @"移植自 DKWechatHelper v1.1.0";
@@ -913,6 +953,9 @@ static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
         [self applyPresetAtIndex:indexPath.row - 2];
     } else if (indexPath.row == 5) {
         [self resetFormatToDefault];
+    } else if (indexPath.row == 6) {
+        // 点自定义颜色行（非输入框区域）时聚焦输入框，方便直接改。
+        [self.colorHexField becomeFirstResponder];
     }
 }
 
