@@ -776,11 +776,9 @@ enum {
 // 格式分区可见＝防撤回已开启；关闭时物理分区只有 3 个（格式分区整个消失）。
 static BOOL WCPHasFormatSection(void) { return WCPPreventRevokeEnabled(); }
 
-static NSInteger WCPPhysicalSectionForLogical(NSInteger logical) {
-    if (!WCPHasFormatSection() && logical > WCPSectionFormat) return logical - 1;
-    return logical;
-}
-
+// （Phase 5.1 修复：WCPPhysicalSectionForLogical 已删——Phase 5 删掉
+// updateFormatCheckmarks 后它是唯一调用者，没人再用它，-Werror 会把它
+// 当成未使用函数报错。反向换算 WCPLogicalSectionForPhysical 还在用。）
 static NSInteger WCPLogicalSectionForPhysical(NSInteger physical) {
     // Phase 3.1 修复：这里必须是 >=，不是 >。
     // 格式分区不存在时物理分区只有 3 个：0＝防撤回，1＝更多功能，2＝关于。
