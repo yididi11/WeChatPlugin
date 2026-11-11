@@ -9,7 +9,7 @@
     @autoreleasepool {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             UIWindow *window = nil;
-            // iOS 13+ 取 keyWindow 的兼容写法
+            // iOS 13+ 取窗口的兼容写法
             for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
                 if (scene.activationState == UISceneActivationStateForegroundActive && [scene isKindOfClass:[UIWindowScene class]]) {
                     window = ((UIWindowScene *)scene).windows.firstObject;
@@ -17,7 +17,12 @@
                 }
             }
             if (!window) {
-                window = [UIApplication sharedApplication].keyWindow;
+                for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                    if ([scene isKindOfClass:[UIWindowScene class]]) {
+                        window = ((UIWindowScene *)scene).windows.firstObject;
+                        break;
+                    }
+                }
             }
             UIViewController *root = window.rootViewController;
             if (!root) return;
